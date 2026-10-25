@@ -168,6 +168,17 @@ class TaskSerializer(serializers.ModelSerializer):
 
         return attrs
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        raw_img = ret.get('attachment_image')
+        if raw_img and not (raw_img.startswith('http://') or raw_img.startswith('https://') or raw_img.startswith('data:')):
+            request = self.context.get('request')
+            if request:
+                full_url = request.build_absolute_uri(raw_img)
+                ret['attachment_image'] = full_url
+                ret['image'] = full_url
+        return ret
+
 
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:

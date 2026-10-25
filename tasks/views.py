@@ -34,7 +34,7 @@ from .services import (
     notify_staff_created, notify_comment_added,
     notify_task_timeline_updated, notify_timeline_reminder,
     check_and_dispatch_all_timeline_reminders, send_test_email_verification,
-    push_message_to_assigned_staff
+    push_message_to_assigned_staff, save_task_attachment_image
 )
 
 
@@ -251,7 +251,17 @@ class TaskViewSet(viewsets.ModelViewSet):
         elif dept and (dept.code.upper() == 'GM' or 'general management' in dept.name.lower()):
             is_gm_own = True
 
-        task = serializer.save(created_by=user, department=dept, is_gm_own_task=is_gm_own)
+        # Handle attachment image: save to media folder if uploaded
+        raw_attachment = (
+            self.request.FILES.get('attachment_image') or
+            self.request.FILES.get('image') or
+            serializer.validated_data.get('attachment_image') or
+            self.request.data.get('attachment_image') or
+            self.request.data.get('image')
+        )
+        saved_media_url = save_task_attachment_image(raw_attachment) if raw_attachment else ''
+
+        task = serializer.save(created_by=user, department=dept, is_gm_own_task=is_gm_own, attachment_image=saved_media_url)
 
         # If it's a GM own task, NEVER notify staff or department managers!
         if task.assigned_to and not task.is_gm_own_task:
@@ -280,7 +290,20 @@ class TaskViewSet(viewsets.ModelViewSet):
         if new_status == Task.STATUS_CLOSED and not user.is_gm_or_super():
             raise PermissionDenied("Exclusive GM sign-off required: Only GM can close tasks.")
 
-        updated_task = serializer.save()
+        raw_attachment = (
+            self.request.FILES.get('attachment_image') or
+            self.request.FILES.get('image') or
+            serializer.validated_data.get('attachment_image') or
+            self.request.data.get('attachment_image') or
+            self.request.data.get('image')
+        )
+        if raw_attachment:
+            saved_media_url = save_task_attachment_image(raw_attachment, task_id=task.id)
+            updated_task = serializer.save(attachment_image=saved_media_url)
+        elif raw_attachment == '':
+            updated_task = serializer.save(attachment_image='')
+        else:
+            updated_task = serializer.save()
 
         # If assignment changed, notify new assignee
         if updated_task.assigned_to and updated_task.assigned_to != old_assigned:
@@ -328,38 +351,41 @@ class TaskViewSet(viewsets.ModelViewSet):
     def start_work(self, request, pk=None):
         task = self.get_object()
         task.status = Task.STATUS_IN_PROGRESS
-        image_data = request.data.get('attachment_image') or request.data.get('image')
+        image_data = request.FILES.get('attachment_image') or request.FILES.get('image') or request.data.get('attachment_image') or request.data.get('image')
         if image_data:
-            task.attachment_image = image_data
+            task.attachment_image = save_task_attachment_image(image_data, task_id=task.id)
         task.save()
         log_activity(request.user, "STARTED_TASK", f"Started work on '{task.title}'", task=task)
-        return Response(TaskSerializer(task).data)
+        return Response(TaskSerializer(task, context={'request': request}).data)
 
     @action(detail=True, methods=['post'], url_path='submit-for-approval')
     def submit_for_approval(self, request, pk=None):
         task = self.get_object()
         task.status = Task.STATUS_PENDING_GM_APPROVAL
-        image_data = request.data.get('attachment_image') or request.data.get('image')
+        image_data = request.FILES.get('attachment_image') or request.FILES.get('image') or request.data.get('attachment_image') or request.data.get('image')
         if image_data:
-            task.attachment_image = image_data
+            task.attachment_image = save_task_attachment_image(image_data, task_id=task.id)
         task.save()
         notify_submitted_for_gm_verification(task, request.user)
         log_activity(request.user, "SUBMITTED_TASK_FOR_APPROVAL", f"Submitted task '{task.title}' for GM verification", task=task)
-        return Response(TaskSerializer(task).data)
+        return Response(TaskSerializer(task, context={'request': request}).data)
 
     @action(detail=True, methods=['post', 'patch'], url_path='attach-image')
     def attach_image(self, request, pk=None):
         task = self.get_object()
-        image_data = request.data.get('attachment_image') or request.data.get('image') or ''
-        task.attachment_image = image_data
+        image_data = request.FILES.get('attachment_image') or request.FILES.get('image') or request.data.get('attachment_image') or request.data.get('image') or ''
+        if image_data:
+            task.attachment_image = save_task_attachment_image(image_data, task_id=task.id)
+        else:
+            task.attachment_image = ''
         task.save()
         log_activity(
             request.user,
             "UPDATED_ATTACHMENT",
-            f"{'Attached image to' if image_data else 'Removed image from'} task '{task.title}'",
+            f"{'Attached image to' if task.attachment_image else 'Removed image from'} task '{task.title}'",
             task=task
         )
-        return Response(TaskSerializer(task).data)
+        return Response(TaskSerializer(task, context={'request': request}).data)
 
     @action(detail=True, methods=['post'], url_path='gm-review')
     def gm_review(self, request, pk=None):

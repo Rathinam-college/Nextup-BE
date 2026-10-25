@@ -1,8 +1,98 @@
+import base64
+import os
+import re
+import time
+import uuid
 import threading
 from django.core.mail import send_mail
 from django.conf import settings
 from django.utils import timezone
 from .models import Notification, DispatchedEmailLog, ActivityLog, User, Task, TaskComment
+
+
+def save_task_attachment_image(image_input, task_id=None):
+    """
+    Saves an uploaded image (Base64 data URI, raw base64, or UploadedFile)
+    into the server media folder: media/task_attachments/
+    and returns its clean URL path: /media/task_attachments/<filename>.
+    
+    If image_input is already a saved URL, it is returned unchanged.
+    If image_input is empty, returns empty string.
+    """
+    if not image_input:
+        return ""
+
+    # If it's already a saved media URL or external URL, return as-is
+    if isinstance(image_input, str):
+        image_input_str = image_input.strip()
+        if not image_input_str:
+            return ""
+        if image_input_str.startswith('/media/') or image_input_str.startswith('http://') or image_input_str.startswith('https://'):
+            return image_input_str
+
+    # Target directory inside MEDIA_ROOT
+    media_root = getattr(settings, 'MEDIA_ROOT', os.path.join(settings.BASE_DIR, 'media'))
+    target_dir = os.path.join(media_root, 'task_attachments')
+    os.makedirs(target_dir, exist_ok=True)
+
+    timestamp = int(time.time())
+    unique_suffix = uuid.uuid4().hex[:8]
+    id_prefix = f"task_{task_id}" if task_id else "task"
+
+    # Case 1: UploadedFile (multipart/form-data upload)
+    if hasattr(image_input, 'read') and hasattr(image_input, 'name'):
+        ext = os.path.splitext(image_input.name)[1].lower() or '.jpg'
+        if ext not in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
+            ext = '.jpg'
+        filename = f"{id_prefix}_{timestamp}_{unique_suffix}{ext}"
+        file_path = os.path.join(target_dir, filename)
+        try:
+            with open(file_path, 'wb+') as dest:
+                for chunk in image_input.chunks():
+                    dest.write(chunk)
+            return f"/media/task_attachments/{filename}"
+        except Exception as e:
+            print(f"⚠️ Error saving UploadedFile image: {e}")
+            return ""
+
+    # Case 2: Base64 String (data:image/...;base64,...)
+    if isinstance(image_input, str):
+        data_str = image_input.strip()
+        ext = '.jpg'
+        base64_content = data_str
+
+        # Parse data URL scheme e.g. "data:image/png;base64,..."
+        match = re.match(r'^data:image/([a-zA-Z0-9\+\-]+);base64,(.+)$', data_str, re.DOTALL)
+        if match:
+            raw_ext = match.group(1).lower()
+            if raw_ext in ['jpeg', 'jpg']:
+                ext = '.jpg'
+            elif raw_ext == 'png':
+                ext = '.png'
+            elif raw_ext == 'webp':
+                ext = '.webp'
+            elif raw_ext == 'gif':
+                ext = '.gif'
+            else:
+                ext = '.jpg'
+            base64_content = match.group(2)
+        elif data_str.startswith('data:') and ';base64,' in data_str:
+            parts = data_str.split(';base64,', 1)
+            base64_content = parts[1]
+
+        try:
+            image_bytes = base64.b64decode(base64_content)
+            filename = f"{id_prefix}_{timestamp}_{unique_suffix}{ext}"
+            file_path = os.path.join(target_dir, filename)
+            with open(file_path, 'wb') as f:
+                f.write(image_bytes)
+            return f"/media/task_attachments/{filename}"
+        except Exception as e:
+            print(f"⚠️ Error decoding and saving base64 image: {e}")
+            return data_str
+
+    return ""
+
 
 
 def _async_send_mail(subject, body, from_email, recipient_email):
