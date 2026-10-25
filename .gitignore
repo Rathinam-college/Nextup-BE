@@ -44,7 +44,11 @@ venv.bak/
 # Static / Media / Logs
 *.log
 staticfiles/
-media/
+media/*
+!media/.gitkeep
+!media/task_attachments/
+media/task_attachments/*
+!media/task_attachments/.gitkeep
 
 # OS / Editor files
 .DS_Store
