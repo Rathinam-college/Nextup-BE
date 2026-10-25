@@ -20,6 +20,8 @@ erDiagram
     USER ||--o{ TASK_COMMENT : "authored_comments (1:N)"
     USER ||--o{ NOTIFICATION : "received_notifications (1:N)"
     USER ||--o{ ACTIVITY_LOG : "actor_logs (1:N)"
+    USER ||--o{ SELF_TASK : "user_self_tasks (1:N)"
+    USER ||--o{ SELF_NOTE : "user_self_notes (1:N)"
 
     TASK ||--o{ TASK_COMMENT : "comments (1:N)"
     TASK ||--o{ NOTIFICATION : "associated_notifications (1:N)"
@@ -54,6 +56,7 @@ erDiagram
         bigint department_id FK "Nullable for GM and SuperAdmin"
         varchar phone
         varchar job_title
+        jsonb allowed_pages "Dynamic page permissions"
         boolean is_active
         boolean is_staff
         boolean is_superuser
@@ -73,6 +76,8 @@ erDiagram
         text gm_feedback_notes "GM audit comments"
         bigint verified_by_id FK "GM exclusive sign-off"
         timestamptz closed_at "Recorded upon GM approval"
+        text attachment_image "Base64 / URL work proof"
+        boolean is_gm_own_task "GM personal private task flag"
         timestamptz created_at
         timestamptz updated_at
     }
@@ -104,6 +109,31 @@ erDiagram
         bigint department_id FK "Nullable"
         bigint task_id FK "Nullable"
         timestamptz timestamp
+    }
+
+    SELF_TASK {
+        bigint id PK
+        bigint user_id FK "Task owner"
+        varchar title
+        text description
+        varchar priority "LOW | MEDIUM | HIGH | URGENT"
+        varchar status "TODO | IN_PROGRESS | COMPLETED"
+        date due_date
+        boolean is_completed
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    SELF_NOTE {
+        bigint id PK
+        bigint user_id FK "Note owner"
+        varchar title
+        text content
+        varchar category "GENERAL | WORK | MEETING | IDEA | CHECKLIST"
+        varchar color
+        boolean is_pinned
+        timestamptz created_at
+        timestamptz updated_at
     }
 ```
 
@@ -139,6 +169,7 @@ Extends Django's `AbstractUser` with enterprise role-based access control (RBAC)
 | `department_id` | `BIGINT` |  Yes | **Foreign Key** (`tasks_department.id`, `ON DELETE SET NULL`) |
 | `job_title` | `VARCHAR(100)` |  Yes | Corporate designation (e.g. `Surveillance Monitoring Officer`) |
 | `phone` | `VARCHAR(25)` |  Yes | Contact phone number |
+| `allowed_pages` | `JSONB` | ❌ No | Accessible pages list (e.g. `['board', 'table', 'self_desk']`) |
 | `is_active` | `BOOLEAN` | ❌ No | Default `TRUE` |
 | `is_staff` | `BOOLEAN` | ❌ No | Django admin panel access flag |
 | `is_superuser` | `BOOLEAN` | ❌ No | Full system bypass flag |
@@ -163,6 +194,8 @@ Core tracking entity with departmental query scoping and exclusive GM verificati
 | `gm_feedback_notes` | `TEXT` |  Yes | Audit remarks entered by General Manager |
 | `verified_by_id` | `BIGINT` |  Yes | **Foreign Key** (`tasks_user.id`, `ON DELETE SET NULL`) - GM sign-off |
 | `closed_at` | `TIMESTAMPTZ` |  Yes | Populated exclusively upon GM sign-off |
+| `attachment_image`| `TEXT` |  Yes | Base64 string or image URL proof |
+| `is_gm_own_task` | `BOOLEAN` | ❌ No | GM personal private task flag (Default: `FALSE`) |
 | `created_at` | `TIMESTAMPTZ` | ❌ No | Creation timestamp |
 | `updated_at` | `TIMESTAMPTZ` | ❌ No | Last modified timestamp |
 
@@ -224,6 +257,41 @@ Append-only tamper-evident compliance audit trail.
 | `department_id` | `BIGINT` |  Yes | **Foreign Key** (`tasks_department.id`, `ON DELETE SET NULL`) |
 | `task_id` | `BIGINT` |  Yes | **Foreign Key** (`tasks_task.id`, `ON DELETE SET NULL`) |
 | `timestamp` | `TIMESTAMPTZ` | ❌ No | Timestamp |
+
+---
+
+### Table: `tasks_selftask` (Personal Self Desk Tasks)
+User-level private task checklist for individual organization and self-work.
+
+| Column | Data Type | Nullable | Constraints / Description |
+| :--- | :--- | :---: | :--- |
+| `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
+| `user_id` | `BIGINT` | ❌ No | **Foreign Key** (`tasks_user.id`, `ON DELETE CASCADE`) - Task owner |
+| `title` | `VARCHAR(255)` | ❌ No | Self task summary |
+| `description` | `TEXT` |  Yes | Task details / notes |
+| `priority` | `VARCHAR(20)` | ❌ No | `LOW`, `MEDIUM`, `HIGH`, `URGENT` (Default: `MEDIUM`) |
+| `status` | `VARCHAR(20)` | ❌ No | `TODO`, `IN_PROGRESS`, `COMPLETED` (Default: `TODO`) |
+| `due_date` | `DATE` |  Yes | Personal target date |
+| `is_completed` | `BOOLEAN` | ❌ No | Completion toggle (Default: `FALSE`) |
+| `created_at` | `TIMESTAMPTZ` | ❌ No | Creation timestamp |
+| `updated_at` | `TIMESTAMPTZ` | ❌ No | Modification timestamp |
+
+---
+
+### Table: `tasks_selfnote` (Personal Memos & Quick Notes)
+Sticky notes, project ideas, checklists, and scratch notes personal to each user.
+
+| Column | Data Type | Nullable | Constraints / Description |
+| :--- | :--- | :---: | :--- |
+| `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
+| `user_id` | `BIGINT` | ❌ No | **Foreign Key** (`tasks_user.id`, `ON DELETE CASCADE`) - Note owner |
+| `title` | `VARCHAR(255)` | ❌ No | Note headline / subject |
+| `content` | `TEXT` |  Yes | Detailed body or markdown checklist |
+| `category` | `VARCHAR(30)` | ❌ No | `GENERAL`, `WORK`, `MEETING`, `IDEA`, `CHECKLIST` |
+| `color` | `VARCHAR(30)` |  Yes | Visual sticky card color theme |
+| `is_pinned` | `BOOLEAN` | ❌ No | Pin to top toggle (Default: `FALSE`) |
+| `created_at` | `TIMESTAMPTZ` | ❌ No | Creation timestamp |
+| `updated_at` | `TIMESTAMPTZ` | ❌ No | Modification timestamp |
 
 ---
 

@@ -38,6 +38,7 @@ class User(AbstractUser):
     )
     phone = models.CharField(max_length=25, blank=True)
     job_title = models.CharField(max_length=100, blank=True)
+    allowed_pages = models.JSONField(default=list, blank=True)
 
     def is_gm_or_super(self):
         return self.role in [self.ROLE_GENERAL_MANAGER, self.ROLE_SUPER_ADMIN] or self.is_superuser
@@ -47,6 +48,18 @@ class User(AbstractUser):
 
     def is_staff_member(self):
         return self.role == self.ROLE_STAFF
+
+    def get_allowed_pages(self):
+        if self.role in [self.ROLE_SUPER_ADMIN, self.ROLE_GENERAL_MANAGER]:
+            return self.allowed_pages or [
+                'board', 'table', 'list', 'calendar', 'self_desk',
+                'today', 'approvals', 'departments', 'staff', 'report', 'settings'
+            ]
+        if self.allowed_pages:
+            return self.allowed_pages
+        if self.role == self.ROLE_DEPT_MANAGER:
+            return ['board', 'table', 'list', 'calendar', 'self_desk', 'departments', 'staff', 'report']
+        return ['board', 'table', 'list', 'calendar', 'self_desk']
 
     def __str__(self):
         dept_str = f" [{self.department.code}]" if self.department else ""
@@ -112,6 +125,9 @@ class Task(models.Model):
 
     # Optional Progress / Work Proof / Incident Image
     attachment_image = models.TextField(blank=True, default='')
+
+    # Flag for GM Own Personal Tasks (Never visible to Department Managers or Staff)
+    is_gm_own_task = models.BooleanField(default=False, db_index=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -180,3 +196,74 @@ class ActivityLog(models.Model):
 
     def __str__(self):
         return f"{self.timestamp:%Y-%m-%d %H:%M} - {self.action}: {self.details[:50]}"
+
+
+class SelfTask(models.Model):
+    PRIORITY_LOW = 'LOW'
+    PRIORITY_MEDIUM = 'MEDIUM'
+    PRIORITY_HIGH = 'HIGH'
+    PRIORITY_URGENT = 'URGENT'
+
+    PRIORITY_CHOICES = [
+        (PRIORITY_LOW, 'Low'),
+        (PRIORITY_MEDIUM, 'Medium'),
+        (PRIORITY_HIGH, 'High'),
+        (PRIORITY_URGENT, 'Urgent'),
+    ]
+
+    STATUS_TODO = 'TODO'
+    STATUS_IN_PROGRESS = 'IN_PROGRESS'
+    STATUS_COMPLETED = 'COMPLETED'
+
+    STATUS_CHOICES = [
+        (STATUS_TODO, 'To Do'),
+        (STATUS_IN_PROGRESS, 'In Progress'),
+        (STATUS_COMPLETED, 'Completed'),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='self_tasks')
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default='')
+    priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default=PRIORITY_MEDIUM)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_TODO)
+    due_date = models.DateField(null=True, blank=True)
+    is_completed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['is_completed', '-created_at']
+
+    def __str__(self):
+        return f"SelfTask: {self.title} ({self.user.username})"
+
+
+class SelfNote(models.Model):
+    CATEGORY_GENERAL = 'GENERAL'
+    CATEGORY_WORK = 'WORK'
+    CATEGORY_MEETING = 'MEETING'
+    CATEGORY_IDEA = 'IDEA'
+    CATEGORY_CHECKLIST = 'CHECKLIST'
+
+    CATEGORY_CHOICES = [
+        (CATEGORY_GENERAL, 'General Note'),
+        (CATEGORY_WORK, 'Work Memo'),
+        (CATEGORY_MEETING, 'Meeting Notes'),
+        (CATEGORY_IDEA, 'Idea / Project Draft'),
+        (CATEGORY_CHECKLIST, 'Quick Checklist'),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='self_notes')
+    title = models.CharField(max_length=255)
+    content = models.TextField(blank=True, default='')
+    category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default=CATEGORY_GENERAL)
+    color = models.CharField(max_length=30, default='default', blank=True)
+    is_pinned = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_pinned', '-updated_at']
+
+    def __str__(self):
+        return f"SelfNote: {self.title} ({self.user.username})"

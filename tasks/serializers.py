@@ -1,5 +1,8 @@
 from rest_framework import serializers
-from .models import Department, User, Task, TaskComment, Notification, DispatchedEmailLog, ActivityLog
+from .models import (
+    Department, User, Task, TaskComment, Notification, DispatchedEmailLog, ActivityLog,
+    SelfTask, SelfNote
+)
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -34,13 +37,14 @@ class UserSerializer(serializers.ModelSerializer):
     department_code = serializers.CharField(source='department.code', read_only=True)
     full_name = serializers.SerializerMethodField()
     password = serializers.CharField(write_only=True, required=False)
+    allowed_pages = serializers.ListField(child=serializers.CharField(), required=False, allow_empty=True)
 
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name', 'full_name',
             'role', 'department', 'department_name', 'department_code',
-            'phone', 'job_title', 'is_active', 'password'
+            'phone', 'job_title', 'is_active', 'password', 'allowed_pages'
         ]
 
     def get_full_name(self, obj):
@@ -117,7 +121,7 @@ class TaskSerializer(serializers.ModelSerializer):
             'assigned_to', 'assigned_to_name', 'assigned_to_email', 'assigned_to_phone', 'created_by', 'created_by_name',
             'priority', 'priority_display', 'status', 'status_display', 'due_date',
             'gm_feedback_notes', 'verified_by', 'verified_by_name', 'closed_at',
-            'attachment_image', 'image',
+            'attachment_image', 'image', 'is_gm_own_task',
             'created_at', 'updated_at', 'comments'
         ]
         read_only_fields = ['created_by', 'verified_by', 'closed_at', 'created_at', 'updated_at']
@@ -187,3 +191,39 @@ class ActivityLogSerializer(serializers.ModelSerializer):
 
     def get_user_name(self, obj):
         return obj.user.get_full_name() or obj.user.username if obj.user else "System"
+
+
+class SelfTaskSerializer(serializers.ModelSerializer):
+    user_name = serializers.SerializerMethodField()
+    priority_display = serializers.CharField(source='get_priority_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = SelfTask
+        fields = [
+            'id', 'user', 'user_name', 'title', 'description',
+            'priority', 'priority_display', 'status', 'status_display',
+            'due_date', 'is_completed', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['user', 'created_at', 'updated_at']
+
+    def get_user_name(self, obj):
+        return obj.user.get_full_name() or obj.user.username
+
+
+class SelfNoteSerializer(serializers.ModelSerializer):
+    user_name = serializers.SerializerMethodField()
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+
+    class Meta:
+        model = SelfNote
+        fields = [
+            'id', 'user', 'user_name', 'title', 'content',
+            'category', 'category_display', 'color', 'is_pinned',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['user', 'created_at', 'updated_at']
+
+    def get_user_name(self, obj):
+        return obj.user.get_full_name() or obj.user.username
+

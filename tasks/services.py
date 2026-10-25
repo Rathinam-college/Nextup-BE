@@ -1,13 +1,28 @@
+import threading
 from django.core.mail import send_mail
 from django.conf import settings
 from django.utils import timezone
 from .models import Notification, DispatchedEmailLog, ActivityLog, User, Task, TaskComment
 
 
+def _async_send_mail(subject, body, from_email, recipient_email):
+    """Worker function executed in background thread to avoid blocking concurrent web requests."""
+    try:
+        send_mail(
+            subject=subject,
+            message=body,
+            from_email=from_email,
+            recipient_list=[recipient_email],
+            fail_silently=True,
+        )
+    except Exception as e:
+        print(f"⚠️ Email dispatch notification for {recipient_email}: {e}")
+
+
 def dispatch_email_and_notification(recipient, subject, body, event_type, task=None, title=None):
     """
-    Sends email via Django mail backend, records it in DispatchedEmailLog,
-    and creates an in-app Notification for the recipient.
+    Sends email via background thread, records it in DispatchedEmailLog,
+    and creates an in-app Notification for the recipient without delaying API response.
     """
     if not recipient:
         return None
@@ -21,24 +36,17 @@ def dispatch_email_and_notification(recipient, subject, body, event_type, task=N
         except Exception:
             pass
 
-    email_error = None
-    # Send mail via Django mail backend
-    try:
-        send_mail(
-            subject=subject,
-            message=body,
-            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'notifications@tasktracker.enterprise'),
-            recipient_list=[recipient.email],
-            fail_silently=False,
-        )
-    except Exception as e:
-        email_error = str(e)
-        print(f"⚠️ Email dispatch notification for {recipient.email}: {e}")
+    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'notifications@tasktracker.enterprise')
+
+    # Non-blocking async dispatch: spawns background thread so HTTP worker immediately returns
+    threading.Thread(
+        target=_async_send_mail,
+        args=(subject, body, from_email, recipient.email),
+        daemon=True
+    ).start()
 
     # Log dispatched email in database for real-time audit & UI demonstration
     log_body = body
-    if email_error:
-        log_body += f"\n\n[Delivery Status: Logged in System / SMTP Notice: {email_error}]"
 
     email_log = DispatchedEmailLog.objects.create(
         recipient_email=recipient.email,
@@ -90,7 +98,23 @@ def format_timeline_text(due_date):
         return f"{due_date} (⏰ {diff} days remaining)"
 
 
+def is_gm_own_task(task):
+    if not task:
+        return False
+    if getattr(task, 'is_gm_own_task', False):
+        return True
+    if task.assigned_to and getattr(task.assigned_to, 'role', '') in [User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN]:
+        return True
+    if getattr(task, 'department', None) and (getattr(task.department, 'code', '').upper() == 'GM' or 'general management' in getattr(task.department, 'name', '').lower()):
+        return True
+    return False
+
+
 def notify_task_assigned(task, assigned_by):
+    # GM Own Task: Never send notification or email to anyone
+    if is_gm_own_task(task):
+        return
+
     recipients = set()
     if task.assigned_to:
         recipients.add(task.assigned_to)
@@ -140,6 +164,9 @@ def notify_task_assigned(task, assigned_by):
 
 
 def notify_task_timeline_updated(task, updated_by, old_due_date):
+    if is_gm_own_task(task):
+        return
+
     recipients = set()
     if task.assigned_to:
         recipients.add(task.assigned_to)
@@ -179,6 +206,9 @@ def notify_task_timeline_updated(task, updated_by, old_due_date):
 
 
 def notify_timeline_reminder(task, triggered_by=None):
+    if is_gm_own_task(task):
+        return []
+
     recipients = set()
     if task.assigned_to:
         recipients.add(task.assigned_to)
@@ -561,10 +591,10 @@ def push_message_to_assigned_staff(task, sender_user, message_text, send_email=T
     }
 
 
-def dispatch_daily_9am_work_reminders(user=None):
+def dispatch_hourly_work_reminders(user=None):
     """
-    Dispatches 9:00 AM daily work update reminder:
-    'Good morning! It's 9:00 AM. Please update your work report and task deliverables for today.'
+    Dispatches continuous 1-hour recurring work update reminder:
+    '⏰ Hourly Work Update Reminder: Please update your work report and active task deliverables.'
     Creates in-app notification and email audit log.
     """
     if user:
@@ -572,11 +602,11 @@ def dispatch_daily_9am_work_reminders(user=None):
     else:
         recipients = list(User.objects.filter(is_active=True))
 
-    subject = "☀️ 9:00 AM Daily Work Update Reminder"
+    subject = "⏰ Hourly Work Update Reminder"
     body = (
-        "Good morning!\n\n"
-        "It's 9:00 AM. Please update your daily work report, progress status, "
-        "and deliverables for today in the Rathinam Task Tracker workspace."
+        "Hello!\n\n"
+        "This is your continuous 1-hour work check-in reminder. Please update your current task progress, "
+        "review pending deliverables, and update your work reports in the Rathinam Task Tracker workspace."
     )
 
     count = 0
@@ -586,13 +616,21 @@ def dispatch_daily_9am_work_reminders(user=None):
                 recipient=r,
                 subject=subject,
                 body=body,
-                event_type='DAILY_9AM_REMINDER',
+                event_type='HOURLY_WORK_REMINDER',
                 title=subject,
             )
             count += 1
         except Exception as e:
-            print(f"Error dispatching 9AM reminder to {r}: {e}")
+            print(f"Error dispatching hourly reminder to {r}: {e}")
 
     return count
+
+
+def dispatch_daily_9am_work_reminders(user=None):
+    """
+    Dispatches work update reminder. Forwarded to dispatch_hourly_work_reminders.
+    """
+    return dispatch_hourly_work_reminders(user=user)
+
 
 

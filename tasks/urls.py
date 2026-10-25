@@ -4,17 +4,21 @@ from .views import (
     DepartmentViewSet, UserViewSet, TaskViewSet,
     TaskCommentViewSet, NotificationViewSet,
     DispatchedEmailLogViewSet, ActivityLogViewSet,
+    SelfTaskViewSet, SelfNoteViewSet,
     list_personas, current_user_me, dashboard_stats,
     login_user, logout_user,
     backup_database_sql, backup_database_json,
     restore_database_sql, restore_database_json,
-    admin_system_stats, clear_database, get_email_status, send_test_email
+    admin_system_stats, clear_database, get_email_status, send_test_email,
+    update_email_settings, get_app_version
 )
 
 router = DefaultRouter()
 router.register(r'departments', DepartmentViewSet, basename='department')
 router.register(r'users', UserViewSet, basename='user')
 router.register(r'tasks', TaskViewSet, basename='task')
+router.register(r'self-tasks', SelfTaskViewSet, basename='self-task')
+router.register(r'self-notes', SelfNoteViewSet, basename='self-note')
 router.register(r'comments', TaskCommentViewSet, basename='comment')
 router.register(r'notifications', NotificationViewSet, basename='notification')
 router.register(r'email-logs', DispatchedEmailLogViewSet, basename='email-log')
@@ -33,6 +37,8 @@ urlpatterns = [
     path('admin/system-stats/', admin_system_stats, name='admin_system_stats'),
     path('admin/clear-database/', clear_database, name='clear_database'),
     path('admin/email-status/', get_email_status, name='get_email_status'),
+    path('admin/email-settings/', update_email_settings, name='update_email_settings'),
     path('admin/send-test-email/', send_test_email, name='send_test_email'),
+    path('app-version/', get_app_version, name='app-version'),
     path('', include(router.urls)),
 ]

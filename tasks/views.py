@@ -17,12 +17,14 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from .models import (
     Department, User, Task, TaskComment,
-    Notification, DispatchedEmailLog, ActivityLog
+    Notification, DispatchedEmailLog, ActivityLog,
+    SelfTask, SelfNote
 )
 from .serializers import (
     DepartmentSerializer, UserSerializer, TaskSerializer,
     TaskCommentSerializer, NotificationSerializer,
-    DispatchedEmailLogSerializer, ActivityLogSerializer
+    DispatchedEmailLogSerializer, ActivityLogSerializer,
+    SelfTaskSerializer, SelfNoteSerializer
 )
 from .permissions import CanManageDepartment, CanManageStaff, IsGMOrSuperAdmin, IsSuperAdmin
 from .services import (
@@ -195,9 +197,16 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         # Departmental Data Isolation:
         # GM and Super Admin see all tasks.
-        # Department Manager sees all tasks for their own department.
-        # Staff sees all tasks for their own department (and can filter by assigned).
+        # Department Manager sees all tasks for their own department (strictly EXCLUDING GM own tasks).
+        # Staff sees all tasks for their own department (strictly EXCLUDING GM own tasks).
         if not user.is_gm_or_super():
+            # Never show GM own tasks to any staff or department manager
+            qs = qs.exclude(
+                Q(is_gm_own_task=True) |
+                Q(assigned_to__role__in=[User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN]) |
+                Q(department__code__iexact='GM') |
+                Q(department__name__icontains='General Management')
+            )
             if user.department:
                 qs = qs.filter(department=user.department)
             else:
@@ -233,9 +242,19 @@ class TaskViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Permission denied: Only General Manager and Super Admin are permitted to create tasks.")
 
         dept = serializer.validated_data.get('department')
-        task = serializer.save(created_by=user, department=dept)
+        assigned_to = serializer.validated_data.get('assigned_to')
+        is_gm_own = serializer.validated_data.get('is_gm_own_task', False)
 
-        if task.assigned_to:
+        # Auto-detect GM own task: if assigned to GM/SuperAdmin, or in GM department, or explicitly flagged
+        if assigned_to and assigned_to.role in [User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN]:
+            is_gm_own = True
+        elif dept and (dept.code.upper() == 'GM' or 'general management' in dept.name.lower()):
+            is_gm_own = True
+
+        task = serializer.save(created_by=user, department=dept, is_gm_own_task=is_gm_own)
+
+        # If it's a GM own task, NEVER notify staff or department managers!
+        if task.assigned_to and not task.is_gm_own_task:
             notify_task_assigned(task, user)
 
         log_activity(
@@ -559,21 +578,29 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         notif.save()
         return Response({"status": "Marked as read."})
 
-    @action(detail=False, methods=['post'], url_path='trigger-daily-reminder')
-    def trigger_daily_reminder(self, request):
+    @action(detail=False, methods=['post'], url_path='trigger-hourly-reminder')
+    def trigger_hourly_reminder(self, request):
         """
-        Trigger the 9:00 AM daily work update reminder for current user or all staff.
+        Trigger the continuous 1-hour work update reminder for current user or all staff.
         """
-        from .services import dispatch_daily_9am_work_reminders
+        from .services import dispatch_hourly_work_reminders
         target_all = request.data.get('all', False) and (
             getattr(request.user, 'role', '') in ['SUPER_ADMIN', 'GENERAL_MANAGER']
         )
-        count = dispatch_daily_9am_work_reminders(user=None if target_all else request.user)
+        count = dispatch_hourly_work_reminders(user=None if target_all else request.user)
         return Response({
             "status": "success",
-            "message": f"Daily 9:00 AM work update reminder dispatched to {count} recipient(s).",
+            "message": f"Continuous 1-hour work update reminder dispatched to {count} recipient(s).",
             "dispatched_count": count
         })
+
+    @action(detail=False, methods=['post'], url_path='trigger-daily-reminder')
+    def trigger_daily_reminder(self, request):
+        """
+        Legacy endpoint alias forwarding to continuous work update reminder.
+        """
+        return self.trigger_hourly_reminder(request)
+
 
 
 class DispatchedEmailLogViewSet(viewsets.ReadOnlyModelViewSet):
@@ -599,11 +626,94 @@ class ActivityLogViewSet(viewsets.ReadOnlyModelViewSet):
         user = self.request.user
         qs = ActivityLog.objects.all().select_related('user', 'department', 'task')
         if not user.is_gm_or_super():
+            qs = qs.exclude(
+                Q(task__is_gm_own_task=True) |
+                Q(task__assigned_to__role__in=[User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN]) |
+                Q(department__code__iexact='GM') |
+                Q(department__name__icontains='General Management')
+            )
             if user.department:
                 qs = qs.filter(department=user.department)
             else:
                 qs = qs.filter(user=user)
         return qs.order_by('-timestamp')[:100]
+
+
+class SelfTaskViewSet(viewsets.ModelViewSet):
+    """
+    Personal / Self Tasks: Strictly private to the logged-in user.
+    No other user can view, edit, or delete another user's self tasks.
+    """
+    serializer_class = SelfTaskSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user.is_authenticated:
+            return SelfTask.objects.none()
+        qs = SelfTask.objects.filter(user=user)
+
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+
+        priority_param = self.request.query_params.get('priority')
+        if priority_param:
+            qs = qs.filter(priority=priority_param)
+
+        completed_param = self.request.query_params.get('is_completed')
+        if completed_param is not None:
+            if completed_param.lower() in ['true', '1']:
+                qs = qs.filter(is_completed=True)
+            elif completed_param.lower() in ['false', '0']:
+                qs = qs.filter(is_completed=False)
+
+        return qs.order_by('is_completed', '-created_at')
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=True, methods=['post'], url_path='toggle-complete')
+    def toggle_complete(self, request, pk=None):
+        self_task = self.get_object()
+        self_task.is_completed = not self_task.is_completed
+        self_task.status = SelfTask.STATUS_COMPLETED if self_task.is_completed else SelfTask.STATUS_TODO
+        self_task.save()
+        return Response(SelfTaskSerializer(self_task).data)
+
+
+class SelfNoteViewSet(viewsets.ModelViewSet):
+    """
+    Personal / Self Notes: Strictly private to the logged-in user.
+    """
+    serializer_class = SelfNoteSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user.is_authenticated:
+            return SelfNote.objects.none()
+        qs = SelfNote.objects.filter(user=user)
+
+        category_param = self.request.query_params.get('category')
+        if category_param:
+            qs = qs.filter(category=category_param)
+
+        pinned_param = self.request.query_params.get('is_pinned')
+        if pinned_param is not None:
+            qs = qs.filter(is_pinned=pinned_param.lower() in ['true', '1'])
+
+        return qs.order_by('-is_pinned', '-updated_at')
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=True, methods=['post'], url_path='toggle-pin')
+    def toggle_pin(self, request, pk=None):
+        self_note = self.get_object()
+        self_note.is_pinned = not self_note.is_pinned
+        self_note.save()
+        return Response(SelfNoteSerializer(self_note).data)
 
 
 # --- Persona Switcher & Auth Endpoints ---
@@ -629,6 +739,7 @@ def list_personas(request):
             'department_code': u.department.code if u.department else '',
             'job_title': u.job_title,
             'email': u.email,
+            'allowed_pages': u.get_allowed_pages() if hasattr(u, 'get_allowed_pages') else (u.allowed_pages or []),
         })
     return Response(personas)
 
@@ -649,6 +760,7 @@ def current_user_me(request):
         'department_code': user.department.code if user.department else '',
         'job_title': user.job_title,
         'is_superuser': user.is_superuser,
+        'allowed_pages': user.get_allowed_pages() if hasattr(user, 'get_allowed_pages') else (user.allowed_pages or []),
     })
 
 
@@ -742,6 +854,7 @@ def login_user(request):
             'department_code': user.department.code if user.department else '',
             'job_title': user.job_title,
             'is_superuser': user.is_superuser,
+            'allowed_pages': user.get_allowed_pages() if hasattr(user, 'get_allowed_pages') else (user.allowed_pages or []),
         })
     else:
         return Response({'detail': 'Invalid username or password.'}, status=status.HTTP_401_UNAUTHORIZED)
@@ -967,25 +1080,44 @@ def restore_database_sql(request):
     db_host = db_conf.get('HOST', 'localhost')
     db_port = db_conf.get('PORT', '5432')
 
+    # Pre-clean script: filter pg_dump 18+ meta-commands (\restrict) and unrecognized configs
+    cleaned_lines = []
+    for line in sql_content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('\\') and stripped != '\\.':
+            continue
+        if stripped.startswith('SET transaction_timeout'):
+            continue
+        cleaned_lines.append(line)
+    sql_content = '\n'.join(cleaned_lines)
+
+    is_full_schema = "CREATE TABLE" in sql_content or "PostgreSQL database dump" in sql_content
+
     # Optionally wipe current application tables before restore to prevent duplicate primary key collisions
     if wipe_before_restore:
         with connection.cursor() as cursor:
-            tables_to_truncate = [
-                'tasks_taskcomment',
-                'tasks_notification',
-                'tasks_dispatchedemaillog',
-                'tasks_activitylog',
-                'tasks_task',
-                'tasks_user_groups',
-                'tasks_user_user_permissions',
-                'tasks_user',
-                'tasks_department',
-            ]
-            for tbl in tables_to_truncate:
+            if is_full_schema:
                 try:
-                    cursor.execute(f'TRUNCATE TABLE "{tbl}" CASCADE;')
+                    cursor.execute('DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO postgres; GRANT ALL ON SCHEMA public TO public;')
                 except Exception:
                     pass
+            else:
+                tables_to_truncate = [
+                    'tasks_taskcomment',
+                    'tasks_notification',
+                    'tasks_dispatchedemaillog',
+                    'tasks_activitylog',
+                    'tasks_task',
+                    'tasks_user_groups',
+                    'tasks_user_user_permissions',
+                    'tasks_user',
+                    'tasks_department',
+                ]
+                for tbl in tables_to_truncate:
+                    try:
+                        cursor.execute(f'TRUNCATE TABLE "{tbl}" CASCADE;')
+                    except Exception:
+                        pass
 
     restore_error = None
     restore_method = "psql"
@@ -994,7 +1126,9 @@ def restore_database_sql(request):
 
     try:
         with tempfile.NamedTemporaryFile('w', suffix='.sql', delete=False, encoding='utf-8') as tf:
-            tf.write(sql_content)
+            # Wrap with session_replication_role = 'replica' so foreign keys do not block out-of-order inserts/copies
+            full_script = "SET session_replication_role = 'replica';\n" + sql_content + "\nSET session_replication_role = 'origin';\n"
+            tf.write(full_script)
             temp_sql_path = tf.name
 
         if psql_path:
@@ -1017,18 +1151,28 @@ def restore_database_sql(request):
                 timeout=60
             )
             if proc.returncode != 0 and 'ERROR:' in proc.stderr:
-                # If psql encountered errors, attempt direct cursor execution fallback
-                try:
-                    with connection.cursor() as cursor:
-                        cursor.execute(sql_content)
-                    restore_error = None
-                    restore_method = "psql_with_cursor_fallback"
-                except Exception as inner_e:
-                    restore_error = f"psql: {proc.stderr[:150]}; cursor: {str(inner_e)[:150]}"
+                # If psql encountered errors and it's pure SQL statements (not COPY ... FROM stdin), attempt direct cursor execution fallback
+                if "COPY " not in sql_content:
+                    try:
+                        with connection.cursor() as cursor:
+                            cursor.execute("SET session_replication_role = 'replica';")
+                            cursor.execute(sql_content)
+                            cursor.execute("SET session_replication_role = 'origin';")
+                        restore_error = None
+                        restore_method = "psql_with_cursor_fallback"
+                    except Exception as inner_e:
+                        restore_error = f"psql: {proc.stderr[:150]}; cursor: {str(inner_e)[:150]}"
+                else:
+                    # Filter benign errors like unrecognized transaction_timeout
+                    errors = [e for e in proc.stderr.splitlines() if 'ERROR:' in e and 'transaction_timeout' not in e]
+                    if errors:
+                        restore_error = f"psql: {'; '.join(errors[:3])}"
         else:
             restore_method = "django_cursor"
             with connection.cursor() as cursor:
+                cursor.execute("SET session_replication_role = 'replica';")
                 cursor.execute(sql_content)
+                cursor.execute("SET session_replication_role = 'origin';")
     except Exception as e:
         restore_error = str(e)
     finally:
@@ -1037,6 +1181,12 @@ def restore_database_sql(request):
                 os.remove(temp_sql_path)
             except Exception:
                 pass
+
+    # Ensure migrations are in sync after restore
+    try:
+        call_command('migrate', interactive=False)
+    except Exception:
+        pass
 
     # Re-establish fresh Django database connection after external psql execution
     try:
@@ -1062,23 +1212,21 @@ def restore_database_sql(request):
             admin_user.set_password('admin')
         admin_user.save()
 
-    # Reset PostgreSQL auto-increment sequences so subsequent creates work smoothly
+    # Dynamically reset PostgreSQL auto-increment sequences for ALL tables
     try:
         with connection.cursor() as cursor:
-            tables_to_seq = [
-                'tasks_department',
-                'tasks_user',
-                'tasks_task',
-                'tasks_taskcomment',
-                'tasks_notification',
-                'tasks_dispatchedemaillog',
-                'tasks_activitylog',
-            ]
-            for tbl in tables_to_seq:
-                try:
-                    cursor.execute(f"SELECT setval(pg_get_serial_sequence('\"{tbl}\"', 'id'), coalesce(max(id), 1)) FROM \"{tbl}\";")
-                except Exception:
-                    pass
+            cursor.execute("""
+                SELECT table_name, column_name, pg_get_serial_sequence(format('%I', table_name), column_name) as seq_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND column_default LIKE 'nextval%'
+            """)
+            seq_rows = cursor.fetchall()
+            for t_name, col_name, s_name in seq_rows:
+                if s_name:
+                    try:
+                        cursor.execute(f"SELECT setval('{s_name}', coalesce(max({col_name}), 1)) FROM \"{t_name}\";")
+                    except Exception:
+                        pass
     except Exception:
         pass
 
@@ -1326,21 +1474,112 @@ def get_email_status(request):
     """
     backend = getattr(settings, 'EMAIL_BACKEND', '')
     is_smtp = 'smtp.EmailBackend' in backend
+    host_user = getattr(settings, 'EMAIL_HOST_USER', '')
+    has_pwd = bool(getattr(settings, 'EMAIL_HOST_PASSWORD', ''))
     return Response({
         'backend': backend,
         'mode': 'SMTP (Live Inbox Delivery)' if is_smtp else 'Console / Local Simulation',
         'host': getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com'),
         'port': getattr(settings, 'EMAIL_PORT', 587),
         'use_tls': getattr(settings, 'EMAIL_USE_TLS', True),
-        'from_email': getattr(settings, 'DEFAULT_FROM_EMAIL', 'notifications@tasktracker.enterprise'),
-        'has_smtp_user': bool(getattr(settings, 'EMAIL_HOST_USER', '')),
-        'has_smtp_password': bool(getattr(settings, 'EMAIL_HOST_PASSWORD', '')),
+        'from_email': getattr(settings, 'DEFAULT_FROM_EMAIL', host_user or 'notifications@tasktracker.enterprise'),
+        'email_host_user': host_user,
+        'has_smtp_user': bool(host_user),
+        'has_smtp_password': has_pwd,
+        'masked_password': '••••••••••••••••' if has_pwd else '',
         'total_dispatched_emails': DispatchedEmailLog.objects.count(),
     })
 
 
 @api_view(['POST'])
-@permission_classes([IsSuperAdmin])
+@permission_classes([IsGMOrSuperAdmin])
+def update_email_settings(request):
+    """
+    Saves and activates SMTP email configuration (Host, Port, User, App Password, TLS).
+    Persists to .env file and dynamically updates runtime Django settings immediately.
+    Optionally dispatches a live test verification email.
+    """
+    user = request.user
+    email_user = request.data.get('email_host_user', '').strip()
+    email_pwd = request.data.get('email_host_password', '').strip()
+    email_host = request.data.get('email_host', 'smtp.gmail.com').strip() or 'smtp.gmail.com'
+    email_port_str = str(request.data.get('email_port', '587')).strip()
+    try:
+        email_port = int(email_port_str)
+    except ValueError:
+        email_port = 587
+
+    use_tls = request.data.get('use_tls', True)
+    if isinstance(use_tls, str):
+        use_tls = use_tls.lower() in ('true', '1', 'yes')
+
+    default_from = request.data.get('default_from_email', '').strip() or email_user or 'notifications@tasktracker.enterprise'
+    test_recipient = request.data.get('test_recipient_email', '').strip()
+
+    # If password is omitted, preserve existing password if present
+    existing_pwd = getattr(settings, 'EMAIL_HOST_PASSWORD', '')
+    if not email_pwd and existing_pwd:
+        email_pwd = existing_pwd
+
+    # 1. Update runtime Django mail settings immediately
+    settings.EMAIL_HOST = email_host
+    settings.EMAIL_PORT = email_port
+    settings.EMAIL_USE_TLS = use_tls
+    settings.EMAIL_HOST_USER = email_user
+    settings.EMAIL_HOST_PASSWORD = email_pwd
+    settings.DEFAULT_FROM_EMAIL = default_from
+
+    if email_user and email_pwd:
+        settings.EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+    else:
+        settings.EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+    # 2. Persist to .env in backend directory
+    env_path = settings.BASE_DIR / '.env'
+    env_content = (
+        f"# NextUp Enterprise SMTP Email Configuration\n"
+        f"# Saved by {user.username} at {timezone.now().isoformat()}\n\n"
+        f"EMAIL_BACKEND={'django.core.mail.backends.smtp.EmailBackend' if email_user and email_pwd else 'django.core.mail.backends.console.EmailBackend'}\n"
+        f"EMAIL_HOST={email_host}\n"
+        f"EMAIL_PORT={email_port}\n"
+        f"EMAIL_USE_TLS={'True' if use_tls else 'False'}\n"
+        f"EMAIL_HOST_USER={email_user}\n"
+        f"EMAIL_HOST_PASSWORD={email_pwd}\n"
+        f"DEFAULT_FROM_EMAIL={default_from}\n"
+    )
+    try:
+        with open(env_path, 'w', encoding='utf-8') as f:
+            f.write(env_content)
+    except Exception as e:
+        print(f"⚠️ Could not write to .env file: {e}")
+
+    log_activity(
+        user,
+        "UPDATED_EMAIL_SETTINGS",
+        f"Updated SMTP email settings (Host: {email_host}:{email_port}, User: {email_user}, Mode: {'SMTP' if email_user and email_pwd else 'Console'})"
+    )
+
+    test_result = None
+    if test_recipient and '@' in test_recipient:
+        test_result = send_test_email_verification(test_recipient, user)
+
+    return Response({
+        'status': 'success',
+        'message': f"Email configuration updated and saved. Delivery mode: {'SMTP Live Inbox' if email_user and email_pwd else 'Console Simulation'}.",
+        'mode': 'SMTP (Live Inbox Delivery)' if email_user and email_pwd else 'Console / Local Simulation',
+        'host': email_host,
+        'port': email_port,
+        'use_tls': use_tls,
+        'email_host_user': email_user,
+        'from_email': default_from,
+        'has_smtp_user': bool(email_user),
+        'has_smtp_password': bool(email_pwd),
+        'test_result': test_result,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsGMOrSuperAdmin])
 def send_test_email(request):
     """
     Sends a test verification email to any specified email address.
@@ -1360,5 +1599,28 @@ def send_test_email(request):
         'message': f"Test email dispatched to {recipient_email}. (Backend: {result['backend']})",
         'details': result
     })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def get_app_version(request):
+    """
+    Returns latest mobile app version metadata for automatic in-app updates.
+    """
+    return Response({
+        "version": "2.2.5",
+        "versionCode": 10,
+        "apkUrl": "https://insight.rathinamtechzone.com/nextup/NextUp.apk",
+        "fallbackApkUrl": "http://192.168.0.101:8090/NextUp.apk",
+        "releaseNotes": [
+            "Login: Added eye visibility icon to view/hide password",
+            "Login: Fixed keyboard view resize & screen jump on typing",
+            "Settings: Modernized profile & app update checker",
+            "UI: Clean executive design and improved responsiveness"
+        ],
+        "publishedAt": "2026-10-24",
+        "mandatory": False
+    })
+
 
 

@@ -76,6 +76,7 @@ DATABASES = {
         'PASSWORD': os.getenv('DB_PASSWORD', 'postgres'),
         'HOST': os.getenv('DB_HOST', 'localhost'),
         'PORT': os.getenv('DB_PORT', '5432'),
+        'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '600')),
     }
 }
 
@@ -144,10 +145,10 @@ REST_FRAMEWORK = {
     ],
 }
 
-# Upload payload size limits (50 MB) to support task attachments and proof images
-DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50 MB
-FILE_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50 MB
-DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000
+# Upload payload size limits (100 MB) to support large SQL database dumps, task attachments, and proof images
+DATA_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100 MB
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 20000
 
 # Email Configuration (SMTP with Console/Database Log Fallback)
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '').strip()
