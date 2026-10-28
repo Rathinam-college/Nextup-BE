@@ -711,6 +711,7 @@ class SelfTaskViewSet(viewsets.ModelViewSet):
 class SelfNoteViewSet(viewsets.ModelViewSet):
     """
     Personal / Self Notes: Strictly private to the logged-in user.
+    Includes Calendar date scheduling and instant notification reminder alerts.
     """
     serializer_class = SelfNoteSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -722,17 +723,39 @@ class SelfNoteViewSet(viewsets.ModelViewSet):
         qs = SelfNote.objects.filter(user=user)
 
         category_param = self.request.query_params.get('category')
-        if category_param:
+        if category_param and category_param != 'ALL':
             qs = qs.filter(category=category_param)
 
         pinned_param = self.request.query_params.get('is_pinned')
         if pinned_param is not None:
             qs = qs.filter(is_pinned=pinned_param.lower() in ['true', '1'])
 
+        date_param = self.request.query_params.get('date')
+        if date_param:
+            qs = qs.filter(reminder_date=date_param)
+
+        has_reminder_param = self.request.query_params.get('has_reminder')
+        if has_reminder_param is not None:
+            qs = qs.filter(reminder_enabled=has_reminder_param.lower() in ['true', '1'])
+
         return qs.order_by('-is_pinned', '-updated_at')
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        old_date = instance.reminder_date
+        old_time = instance.reminder_time
+        old_enabled = instance.reminder_enabled
+
+        updated_instance = serializer.save()
+        if (updated_instance.reminder_date != old_date or
+            updated_instance.reminder_time != old_time or
+            (updated_instance.reminder_enabled and not old_enabled)):
+            if updated_instance.reminder_enabled:
+                updated_instance.is_reminder_sent = False
+                updated_instance.save(update_fields=['is_reminder_sent'])
 
     @action(detail=True, methods=['post'], url_path='toggle-pin')
     def toggle_pin(self, request, pk=None):
@@ -740,6 +763,70 @@ class SelfNoteViewSet(viewsets.ModelViewSet):
         self_note.is_pinned = not self_note.is_pinned
         self_note.save()
         return Response(SelfNoteSerializer(self_note).data)
+
+    @action(detail=False, methods=['get', 'post'], url_path='check-reminders')
+    def check_reminders(self, request):
+        user = request.user
+        if not user.is_authenticated:
+            return Response({"triggered_count": 0, "triggered_notes": []})
+
+        now = timezone.localtime()
+        today = now.date()
+        current_time = now.time()
+
+        due_notes = SelfNote.objects.filter(
+            user=user,
+            reminder_enabled=True,
+            is_reminder_sent=False,
+            reminder_date__isnull=False,
+            reminder_date__lte=today,
+        )
+
+        triggered = []
+        for note in due_notes:
+            if note.reminder_date == today and note.reminder_time:
+                if note.reminder_time > current_time:
+                    continue
+
+            note.is_reminder_sent = True
+            note.save(update_fields=['is_reminder_sent'])
+
+            time_str = f" at {note.reminder_time.strftime('%I:%M %p')}" if note.reminder_time else ""
+            dispatch_email_and_notification(
+                recipient=user,
+                subject=f"⏰ Note Reminder: {note.title}",
+                body=f"Reminder for your scheduled note{time_str}:\n\nTitle: {note.title}\n\nContent:\n{note.content}" if note.content else f"Reminder for scheduled note '{note.title}'.",
+                event_type='NOTE_REMINDER',
+                task=None,
+                title=f"Note Reminder: {note.title}"
+            )
+            triggered.append(SelfNoteSerializer(note).data)
+
+        return Response({
+            "triggered_count": len(triggered),
+            "triggered_notes": triggered
+        })
+
+    @action(detail=True, methods=['post'], url_path='send-reminder')
+    def send_reminder(self, request, pk=None):
+        note = self.get_object()
+        note.is_reminder_sent = True
+        note.save(update_fields=['is_reminder_sent'])
+
+        email_log, notif = dispatch_email_and_notification(
+            recipient=request.user,
+            subject=f"⏰ Note Reminder: {note.title}",
+            body=f"Reminder dispatched for note:\n\nTitle: {note.title}\n\nContent:\n{note.content}" if note.content else f"Reminder alert for note '{note.title}'.",
+            event_type='NOTE_REMINDER',
+            task=None,
+            title=f"Note Reminder: {note.title}"
+        )
+
+        return Response({
+            "status": "success",
+            "message": f"Reminder notification dispatched for '{note.title}'.",
+            "note": SelfNoteSerializer(note).data
+        })
 
 
 # --- Persona Switcher & Auth Endpoints ---

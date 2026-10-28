@@ -231,6 +231,7 @@ class SelfNoteSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'user_name', 'title', 'content',
             'category', 'category_display', 'color', 'is_pinned',
+            'reminder_date', 'reminder_time', 'reminder_enabled', 'is_reminder_sent',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['user', 'created_at', 'updated_at']

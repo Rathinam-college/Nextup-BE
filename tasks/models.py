@@ -259,6 +259,10 @@ class SelfNote(models.Model):
     category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default=CATEGORY_GENERAL)
     color = models.CharField(max_length=30, default='default', blank=True)
     is_pinned = models.BooleanField(default=False)
+    reminder_date = models.DateField(null=True, blank=True)
+    reminder_time = models.TimeField(null=True, blank=True)
+    reminder_enabled = models.BooleanField(default=False)
+    is_reminder_sent = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
