@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     Department, User, Task, TaskComment, Notification, DispatchedEmailLog, ActivityLog,
-    SelfTask, SelfNote
+    SelfTask, SelfNote, UserDevice, UserSessionLog
 )
 
 
@@ -239,3 +239,44 @@ class SelfNoteSerializer(serializers.ModelSerializer):
     def get_user_name(self, obj):
         return obj.user.get_full_name() or obj.user.username
 
+
+class UserDeviceSerializer(serializers.ModelSerializer):
+    user_name = serializers.SerializerMethodField()
+    department_name = serializers.SerializerMethodField()
+    role_display = serializers.CharField(source='user.get_role_display', read_only=True)
+
+    class Meta:
+        model = UserDevice
+        fields = [
+            'id', 'user', 'user_name', 'department_name', 'role_display',
+            'device_token', 'device_type', 'device_name', 'app_version',
+            'is_active', 'last_seen', 'created_at'
+        ]
+        read_only_fields = ['user', 'last_seen', 'created_at']
+
+    def get_user_name(self, obj):
+        return obj.user.get_full_name() or obj.user.username
+
+    def get_department_name(self, obj):
+        return obj.user.department.name if obj.user.department else 'Global'
+
+
+class UserSessionLogSerializer(serializers.ModelSerializer):
+    user_name = serializers.SerializerMethodField()
+    department_name = serializers.SerializerMethodField()
+    role_display = serializers.CharField(source='user.get_role_display', read_only=True)
+
+    class Meta:
+        model = UserSessionLog
+        fields = [
+            'id', 'user', 'user_name', 'department_name', 'role_display',
+            'session_key', 'platform', 'device_info', 'ip_address',
+            'user_agent', 'login_time', 'logout_time', 'last_activity', 'is_active'
+        ]
+        read_only_fields = ['login_time', 'last_activity']
+
+    def get_user_name(self, obj):
+        return obj.user.get_full_name() or obj.user.username
+
+    def get_department_name(self, obj):
+        return obj.user.department.name if obj.user.department else 'Global'

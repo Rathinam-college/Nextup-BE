@@ -18,13 +18,13 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from .models import (
     Department, User, Task, TaskComment,
     Notification, DispatchedEmailLog, ActivityLog,
-    SelfTask, SelfNote
+    SelfTask, SelfNote, UserDevice, UserSessionLog
 )
 from .serializers import (
     DepartmentSerializer, UserSerializer, TaskSerializer,
     TaskCommentSerializer, NotificationSerializer,
     DispatchedEmailLogSerializer, ActivityLogSerializer,
-    SelfTaskSerializer, SelfNoteSerializer
+    SelfTaskSerializer, SelfNoteSerializer, UserDeviceSerializer, UserSessionLogSerializer
 )
 from .permissions import CanManageDepartment, CanManageStaff, IsGMOrSuperAdmin, IsSuperAdmin
 from .services import (
@@ -34,7 +34,8 @@ from .services import (
     notify_staff_created, notify_comment_added,
     notify_task_timeline_updated, notify_timeline_reminder,
     check_and_dispatch_all_timeline_reminders, send_test_email_verification,
-    push_message_to_assigned_staff, save_task_attachment_image
+    push_message_to_assigned_staff, save_task_attachment_image,
+    send_expo_push_notification, record_user_login, record_user_logout
 )
 
 
@@ -507,6 +508,42 @@ class TaskViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=True, methods=['get', 'post'], url_path='comments')
+    def comments(self, request, pk=None):
+        """
+        List or create comments/discussion messages on this task.
+        Directly satisfies both GET /api/tasks/<id>/comments/ and POST /api/tasks/<id>/comments/
+        """
+        task = self.get_object()
+        if request.method == 'GET':
+            comments_qs = task.comments.all().select_related('author').order_by('created_at')
+            serializer = TaskCommentSerializer(comments_qs, many=True)
+            return Response(serializer.data)
+
+        # POST: Create comment/discussion message
+        content = request.data.get('content', '').strip()
+        if not content:
+            return Response({'detail': 'Comment content cannot be empty.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user if request.user and request.user.is_authenticated else None
+        if not user:
+            user_id = request.headers.get('X-Active-User-Id') or request.META.get('HTTP_X_ACTIVE_USER_ID')
+            if user_id:
+                user = User.objects.filter(pk=user_id, is_active=True).first()
+        if not user:
+            return Response({'detail': 'Authentication required to post comments.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        comment = TaskComment.objects.create(
+            task=task,
+            author=user,
+            content=content
+        )
+        notify_comment_added(comment)
+        log_activity(user, "ADDED_COMMENT", f"Added comment on task '{task.title}'", task=task)
+
+        serializer = TaskCommentSerializer(comment)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
     @action(detail=False, methods=['post'], url_path='check-timeline-reminders')
     def check_timeline_reminders(self, request):
         """
@@ -626,6 +663,23 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         Legacy endpoint alias forwarding to continuous work update reminder.
         """
         return self.trigger_hourly_reminder(request)
+
+    @action(detail=False, methods=['post'], url_path='trigger-urgent-reminders')
+    def trigger_urgent_reminders(self, request):
+        """
+        Dispatches push notifications and emails for all tasks that are URGENT priority or due today / overdue.
+        """
+        from .services import dispatch_urgent_and_due_date_reminders
+        target_all = request.data.get('all', False) and (
+            getattr(request.user, 'role', '') in ['SUPER_ADMIN', 'GENERAL_MANAGER']
+        )
+        res = dispatch_urgent_and_due_date_reminders(user=None if target_all else request.user)
+        return Response({
+            "status": "success",
+            "message": f"Urgent and Due Date push alerts dispatched for {res['count']} task(s).",
+            "count": res['count'],
+            "tasks": res['tasks']
+        })
 
 
 
@@ -844,14 +898,19 @@ def list_personas(request):
         personas.append({
             'id': u.id,
             'username': u.username,
+            'first_name': u.first_name or '',
+            'last_name': u.last_name or '',
             'full_name': u.get_full_name() or u.username,
+            'email': u.email,
+            'phone': u.phone or '',
             'role': u.role,
             'role_display': u.get_role_display(),
+            'department': u.department.id if u.department else None,
             'department_id': u.department.id if u.department else None,
             'department_name': u.department.name if u.department else 'Global / None',
             'department_code': u.department.code if u.department else '',
-            'job_title': u.job_title,
-            'email': u.email,
+            'job_title': u.job_title or '',
+            'is_active': u.is_active,
             'allowed_pages': u.get_allowed_pages() if hasattr(u, 'get_allowed_pages') else (u.allowed_pages or []),
         })
     return Response(personas)
@@ -864,14 +923,19 @@ def current_user_me(request):
     return Response({
         'id': user.id,
         'username': user.username,
+        'first_name': user.first_name or '',
+        'last_name': user.last_name or '',
         'full_name': user.get_full_name() or user.username,
         'email': user.email,
+        'phone': user.phone or '',
         'role': user.role,
         'role_display': user.get_role_display(),
+        'department': user.department.id if user.department else None,
         'department_id': user.department.id if user.department else None,
         'department_name': user.department.name if user.department else 'Global / None',
         'department_code': user.department.code if user.department else '',
-        'job_title': user.job_title,
+        'job_title': user.job_title or '',
+        'is_active': user.is_active,
         'is_superuser': user.is_superuser,
         'allowed_pages': user.get_allowed_pages() if hasattr(user, 'get_allowed_pages') else (user.allowed_pages or []),
     })
@@ -934,6 +998,17 @@ def dashboard_stats(request):
 def login_user(request):
     username = request.data.get('username', '').strip()
     password = request.data.get('password', '')
+    platform = request.data.get('platform', '')
+    device_info = request.data.get('device_info', '')
+    device_token = request.data.get('device_token') or request.data.get('push_token') or ''
+    app_version = request.data.get('app_version', '')
+
+    user_agent = request.META.get('HTTP_USER_AGENT', '').lower()
+    if not platform:
+        if 'okhttp' in user_agent or 'expo' in user_agent or 'mobile' in user_agent or device_token:
+            platform = 'mobile_apk'
+        else:
+            platform = 'web'
 
     if not username or not password:
         return Response({'detail': 'Please provide both username and password.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -955,17 +1030,47 @@ def login_user(request):
             return Response({'detail': 'This user account has been disabled.'}, status=status.HTTP_403_FORBIDDEN)
 
         login(request, user)
+
+        # 1. Register or update mobile device push token if provided
+        if device_token and device_token.strip():
+            UserDevice.objects.update_or_create(
+                device_token=device_token.strip(),
+                defaults={
+                    'user': user,
+                    'device_type': platform,
+                    'device_name': device_info or ('Android Device' if platform == 'mobile_apk' else platform),
+                    'app_version': app_version,
+                    'is_active': True,
+                    'last_seen': timezone.now()
+                }
+            )
+
+        # 2. Record Session Log
+        record_user_login(user, request, platform=platform, device_info=device_info)
+
+        # 3. Log Activity
+        log_activity(
+            user,
+            action="USER_LOGIN",
+            details=f"Logged in via {platform.upper()} ({device_info or 'Unknown device'})"
+        )
+
         return Response({
             'id': user.id,
             'username': user.username,
+            'first_name': user.first_name or '',
+            'last_name': user.last_name or '',
             'full_name': user.get_full_name() or user.username,
             'email': user.email,
+            'phone': user.phone or '',
             'role': user.role,
             'role_display': user.get_role_display(),
+            'department': user.department.id if user.department else None,
             'department_id': user.department.id if user.department else None,
             'department_name': user.department.name if user.department else 'Global / None',
             'department_code': user.department.code if user.department else '',
-            'job_title': user.job_title,
+            'job_title': user.job_title or '',
+            'is_active': user.is_active,
             'is_superuser': user.is_superuser,
             'allowed_pages': user.get_allowed_pages() if hasattr(user, 'get_allowed_pages') else (user.allowed_pages or []),
         })
@@ -977,8 +1082,175 @@ def login_user(request):
 @authentication_classes([])
 @permission_classes([permissions.AllowAny])
 def logout_user(request):
+    user_id = request.data.get('user_id')
+    username = request.data.get('username')
+    device_token = request.data.get('device_token') or request.data.get('push_token')
+
+    target_user = request.user if (request.user and request.user.is_authenticated) else None
+    if not target_user and user_id:
+        target_user = User.objects.filter(id=user_id).first()
+    if not target_user and username:
+        target_user = User.objects.filter(username=username).first()
+
+    if device_token:
+        UserDevice.objects.filter(device_token=device_token).update(is_active=False)
+
+    if target_user:
+        record_user_logout(target_user, request)
+        log_activity(
+            target_user,
+            action="USER_LOGOUT",
+            details="Logged out of system"
+        )
+
     logout(request)
     return Response({'status': 'Logged out successfully.'})
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def register_device(request):
+    """Registers or updates user device token from mobile APK"""
+    token = request.data.get('device_token', '').strip()
+    if not token:
+        return Response({'error': 'device_token is required'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    device_type = request.data.get('device_type', 'android')
+    device_name = request.data.get('device_name', '')
+    app_version = request.data.get('app_version', '')
+
+    device, created = UserDevice.objects.update_or_create(
+        device_token=token,
+        defaults={
+            'user': request.user,
+            'device_type': device_type,
+            'device_name': device_name or f"{device_type.capitalize()} Device",
+            'app_version': app_version,
+            'is_active': True,
+            'last_seen': timezone.now(),
+        }
+    )
+    return Response({
+        'status': 'registered',
+        'id': device.id,
+        'created': created,
+        'message': f"Device registered for {request.user.username}"
+    })
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def test_push_notification(request):
+    """Admin or GM can test sending push notification to a user, device, or all devices"""
+    user_id = request.data.get('user_id')
+    title = request.data.get('title', '🔔 NextUp Live Alert')
+    body = request.data.get('body', 'Push notification is working perfectly on your mobile device!')
+
+    if user_id:
+        target_users = list(User.objects.filter(id=user_id, is_active=True))
+    elif request.data.get('send_to_all'):
+        if not request.user.is_gm_or_super():
+            raise PermissionDenied("Only GM and Super Admin can broadcast test alerts.")
+        target_users = list(User.objects.filter(is_active=True))
+    else:
+        target_users = [request.user]
+
+    all_tokens = []
+    for u in target_users:
+        tokens = list(u.devices.filter(is_active=True).values_list('device_token', flat=True))
+        all_tokens.extend(tokens)
+
+    if not all_tokens:
+        return Response({
+            'success': False,
+            'sent_count': 0,
+            'message': 'No registered mobile devices found with active push tokens. Make sure users have opened the mobile APK and allowed notifications.'
+        }, status=status.HTTP_404_NOT_FOUND)
+
+    send_expo_push_notification(
+        tokens=all_tokens,
+        title=title,
+        body=body,
+        data={'type': 'TEST_NOTIFICATION', 'sent_by': request.user.username}
+    )
+
+    return Response({
+        'success': True,
+        'sent_count': len(all_tokens),
+        'message': f"Push notification dispatched to {len(all_tokens)} mobile device(s)!"
+    })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def admin_user_sessions(request):
+    """Admin Dashboard endpoint to inspect who is using the app and login/logout activity"""
+    if not request.user.is_gm_or_super():
+        raise PermissionDenied("Only Administrators and General Managers can view session and device logs.")
+
+    # 1. Recent session logs
+    sessions_qs = UserSessionLog.objects.select_related('user', 'user__department').order_by('-login_time')[:100]
+    sessions_data = UserSessionLogSerializer(sessions_qs, many=True).data
+
+    # 2. Registered devices
+    devices_qs = UserDevice.objects.select_related('user', 'user__department').order_by('-last_seen')
+    devices_data = UserDeviceSerializer(devices_qs, many=True).data
+
+    # 3. Active / online users (active session or activity in last 15 min)
+    recent_threshold = timezone.now() - timezone.timedelta(minutes=15)
+    active_session_user_ids = set(UserSessionLog.objects.filter(is_active=True, last_activity__gte=recent_threshold).values_list('user_id', flat=True))
+    active_device_user_ids = set(UserDevice.objects.filter(is_active=True, last_seen__gte=recent_threshold).values_list('user_id', flat=True))
+    online_user_ids = active_session_user_ids.union(active_device_user_ids)
+
+    all_users = User.objects.filter(is_active=True).select_related('department')
+    users_status = []
+    for u in all_users:
+        is_online = u.id in online_user_ids
+        latest_session = UserSessionLog.objects.filter(user=u).order_by('-login_time').first()
+        user_devices = [d for d in devices_data if d['user'] == u.id]
+        
+        users_status.append({
+            'id': u.id,
+            'username': u.username,
+            'full_name': u.get_full_name() or u.username,
+            'role': u.role,
+            'role_display': u.get_role_display(),
+            'department_name': u.department.name if u.department else 'Global',
+            'is_online': is_online,
+            'last_seen': latest_session.last_activity.isoformat() if latest_session else (u.last_login.isoformat() if u.last_login else None),
+            'latest_platform': latest_session.platform if latest_session else ('mobile_apk' if user_devices else 'web'),
+            'latest_device': latest_session.device_info if latest_session else (user_devices[0]['device_name'] if user_devices else ''),
+            'devices_count': len(user_devices),
+            'devices': user_devices
+        })
+
+    stats = {
+        'total_users': all_users.count(),
+        'online_users_count': len(online_user_ids),
+        'total_registered_devices': len(devices_data),
+        'mobile_apk_users_count': len({d['user'] for d in devices_data}),
+        'active_sessions_count': UserSessionLog.objects.filter(is_active=True).count(),
+    }
+
+    return Response({
+        'stats': stats,
+        'users': users_status,
+        'recent_sessions': sessions_data,
+        'devices': devices_data
+    })
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def ping_user_activity(request):
+    """Heartbeat sent periodically from mobile app and web frontend"""
+    device_token = request.data.get('device_token')
+    if device_token:
+        UserDevice.objects.filter(device_token=device_token).update(last_seen=timezone.now(), is_active=True)
+    
+    UserSessionLog.objects.filter(user=request.user, is_active=True).update(last_activity=timezone.now())
+    return Response({'status': 'pong', 'timestamp': timezone.now().isoformat()})
+
 
 
 def find_pg_dump():

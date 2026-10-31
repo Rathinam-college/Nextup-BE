@@ -271,3 +271,46 @@ class SelfNote(models.Model):
 
     def __str__(self):
         return f"SelfNote: {self.title} ({self.user.username})"
+
+
+class UserDevice(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='devices')
+    device_token = models.CharField(max_length=255, unique=True, db_index=True)
+    device_type = models.CharField(max_length=50, default='android')
+    device_name = models.CharField(max_length=150, blank=True, default='')
+    app_version = models.CharField(max_length=50, blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    last_seen = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-last_seen']
+
+    def __str__(self):
+        return f"{self.user.username} - {self.device_name or self.device_type} ({self.device_token[:15]}...)"
+
+
+class UserSessionLog(models.Model):
+    PLATFORM_MOBILE_APK = 'mobile_apk'
+    PLATFORM_WEB = 'web'
+    PLATFORM_IOS = 'ios'
+    PLATFORM_ANDROID = 'android'
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='session_logs')
+    session_key = models.CharField(max_length=100, blank=True, default='')
+    platform = models.CharField(max_length=50, default=PLATFORM_WEB)
+    device_info = models.CharField(max_length=255, blank=True, default='')
+    ip_address = models.CharField(max_length=60, blank=True, default='')
+    user_agent = models.TextField(blank=True, default='')
+    login_time = models.DateTimeField(auto_now_add=True)
+    logout_time = models.DateTimeField(null=True, blank=True)
+    last_activity = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+
+    class Meta:
+        ordering = ['-login_time']
+
+    def __str__(self):
+        status = "Active" if self.is_active else "Logged Out"
+        return f"{self.user.username} [{self.platform}] - {status} ({self.login_time:%Y-%m-%d %H:%M})"
+

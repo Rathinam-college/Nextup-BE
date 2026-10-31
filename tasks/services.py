@@ -4,10 +4,12 @@ import re
 import time
 import uuid
 import threading
+import requests
 from django.core.mail import send_mail
 from django.conf import settings
 from django.utils import timezone
-from .models import Notification, DispatchedEmailLog, ActivityLog, User, Task, TaskComment
+from django.db.models import Q
+from .models import Notification, DispatchedEmailLog, ActivityLog, User, Task, TaskComment, UserDevice, UserSessionLog
 
 
 def save_task_attachment_image(image_input, task_id=None):
@@ -109,6 +111,86 @@ def _async_send_mail(subject, body, from_email, recipient_email):
         print(f"⚠️ Email dispatch notification for {recipient_email}: {e}")
 
 
+
+def send_expo_push_notification(tokens, title, body, data=None):
+    """
+    Sends native mobile push notifications via Expo Push Notification API.
+    Dispatches in a background daemon thread so it never blocks Django response.
+    """
+    if not tokens:
+        return
+    if isinstance(tokens, str):
+        tokens = [tokens]
+    
+    valid_tokens = [
+        t.strip() for t in tokens 
+        if t and isinstance(t, str) and (t.startswith('ExponentPushToken[') or t.startswith('ExpoPushToken['))
+    ]
+    if not valid_tokens:
+        return
+
+    messages = []
+    for token in valid_tokens:
+        is_urgent_alert = 'urgent' in title.lower() or 'overdue' in title.lower() or 'due' in title.lower() or (data and data.get('is_urgent'))
+        is_hourly = (data and data.get('type') == 'HOURLY_WORK_REMINDER')
+        channel_id = 'urgent-due-alerts-channel' if is_urgent_alert else ('hourly-work-reminders' if is_hourly else 'task-alerts-channel')
+        msg = {
+            'to': token,
+            'sound': 'default',
+            'title': title,
+            'body': body,
+            'priority': 'high',
+            'channelId': channel_id,
+        }
+        if data:
+            msg['data'] = data
+        messages.append(msg)
+
+    def _do_push():
+        try:
+            resp = requests.post(
+                'https://exp.host/--/api/v2/push/send',
+                json=messages,
+                headers={
+                    'Accept': 'application/json',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'Content-Type': 'application/json',
+                },
+                timeout=10
+            )
+            print(f"[ExpoPush] Sent to {len(messages)} device(s) - HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"[ExpoPush] Push delivery exception: {e}")
+
+    threading.Thread(target=_do_push, daemon=True).start()
+
+
+def record_user_login(user, request, platform='web', device_info=''):
+    ip = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', ''))
+    if ip and ',' in ip:
+        ip = ip.split(',')[0].strip()
+    user_agent = request.META.get('HTTP_USER_AGENT', '')
+    session_key = getattr(request.session, 'session_key', '') or ''
+    
+    session_log = UserSessionLog.objects.create(
+        user=user,
+        session_key=session_key,
+        platform=platform,
+        device_info=device_info,
+        ip_address=ip or '',
+        user_agent=user_agent or '',
+        is_active=True
+    )
+    return session_log
+
+
+def record_user_logout(user, request=None):
+    if user:
+        UserSessionLog.objects.filter(user=user, is_active=True).update(
+            is_active=False,
+            logout_time=timezone.now()
+        )
+
 def dispatch_email_and_notification(recipient, subject, body, event_type, task=None, title=None):
     """
     Sends email via background thread, records it in DispatchedEmailLog,
@@ -155,6 +237,23 @@ def dispatch_email_and_notification(recipient, subject, body, event_type, task=N
         notification_type=event_type,
         task=task,
     )
+
+    # Dispatch native mobile push notification to recipient's active devices
+    try:
+        active_tokens = list(recipient.devices.filter(is_active=True).values_list('device_token', flat=True))
+        if active_tokens:
+            send_expo_push_notification(
+                tokens=active_tokens,
+                title=notif_title,
+                body=body[:220],
+                data={
+                    'taskId': task.id if task else None,
+                    'type': event_type,
+                    'notificationId': notification.id,
+                }
+            )
+    except Exception as push_err:
+        print(f"[ExpoPush] Device lookup error: {push_err}")
 
     return email_log, notification
 
@@ -659,6 +758,23 @@ def push_message_to_assigned_staff(task, sender_user, message_text, send_email=T
         content=f"💬 [DIRECT MESSAGE PUSHED TO {staff_name}]{urgent_tag}:\n\"{message_text}\""
     )
 
+    # Dispatch mobile push notification to staff devices
+    try:
+        staff_tokens = list(staff.devices.filter(is_active=True).values_list('device_token', flat=True))
+        if staff_tokens:
+            send_expo_push_notification(
+                tokens=staff_tokens,
+                title=f"{urgency_prefix}Direct Message from {sender_name}",
+                body=f"Task #{task.id} '{task.title}': {message_text}",
+                data={
+                    'taskId': task.id,
+                    'type': 'DIRECT_STAFF_MESSAGE',
+                    'is_urgent': priority_urgent,
+                }
+            )
+    except Exception as staff_push_err:
+        print(f"[ExpoPush] Staff message push error: {staff_push_err}")
+
     # Activity log
     log_activity(
         user=sender_user,
@@ -681,33 +797,75 @@ def push_message_to_assigned_staff(task, sender_user, message_text, send_email=T
     }
 
 
-def dispatch_hourly_work_reminders(user=None):
+def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
     """
-    Dispatches continuous 1-hour recurring work update reminder:
-    '⏰ Hourly Work Update Reminder: Please update your work report and active task deliverables.'
-    Creates in-app notification and email audit log.
+    Dispatches 1-hour recurring work check-in reminder during working hours (9:00 AM to 6:00 PM).
+    If user has urgent or due date tasks, the push notification explicitly highlights them!
     """
+    now_local = timezone.localtime(timezone.now())
+    if enforce_work_hours and not (9 <= now_local.hour <= 18):
+        print(f"[HourlyReminder] Outside working hours (Current hour: {now_local.hour}:00). Reminders run between 9:00 AM and 6:00 PM.")
+        return 0
+
     if user:
         recipients = [user]
     else:
         recipients = list(User.objects.filter(is_active=True))
 
-    subject = "⏰ Hourly Work Update Reminder"
-    body = (
-        "Hello!\n\n"
-        "This is your continuous 1-hour work check-in reminder. Please update your current task progress, "
-        "review pending deliverables, and update your work reports in the Rathinam Task Tracker workspace."
-    )
-
+    today = timezone.now().date()
     count = 0
+
     for r in recipients:
         try:
+            active_tasks = Task.objects.filter(assigned_to=r).exclude(status=Task.STATUS_CLOSED)
+            urgent_or_due = active_tasks.filter(
+                Q(priority=Task.PRIORITY_URGENT) | Q(due_date__lte=today)
+            ).order_by('due_date')
+
+            urgent_count = urgent_or_due.count()
+            if urgent_count > 0:
+                top_task = urgent_or_due.first()
+                if top_task.due_date and top_task.due_date < today:
+                    tag = f"OVERDUE by {(today - top_task.due_date).days}d"
+                elif top_task.due_date and top_task.due_date == today:
+                    tag = "DUE TODAY"
+                else:
+                    tag = "URGENT PRIORITY"
+
+                subject = f"🚨 [9AM-6PM Check-In] {urgent_count} Urgent / Due Deliverable(s)"
+                body = (
+                    f"Hello {r.get_full_name() or r.username},\n\n"
+                    f"This is your hourly work check-in (9:00 AM – 6:00 PM Work Hours).\n\n"
+                    f"⚠️ ATTENTION - PENDING URGENT DELIVERABLE:\n"
+                    f"• Task: #{top_task.id} '{top_task.title}'\n"
+                    f"• Department: {top_task.department.name} ({top_task.department.code})\n"
+                    f"• Priority: {top_task.get_priority_display()}\n"
+                    f"• Due Date: {top_task.due_date or 'Immediate'}\n"
+                    f"• Status Notice: {tag}\n\n"
+                    f"Total urgent / due tasks waiting: {urgent_count}.\n"
+                    f"Please review and submit your progress updates on NextUp."
+                )
+                event_type = 'HOURLY_WORK_REMINDER'
+                notif_title = f"🚨 [Urgent Task Due] #{top_task.id} {top_task.title}"
+                top_task_obj = top_task
+            else:
+                subject = "⏰ Hourly Work Check-In (9:00 AM – 6:00 PM)"
+                body = (
+                    f"Hello {r.get_full_name() or r.username},\n\n"
+                    f"This is your continuous 1-hour work check-in reminder (9:00 AM - 6:00 PM).\n"
+                    f"Please keep your active tasks, progress reports, and deliverables current."
+                )
+                event_type = 'HOURLY_WORK_REMINDER'
+                notif_title = "⏰ 1-Hour Work Check-In (9 AM - 6 PM)"
+                top_task_obj = None
+
             dispatch_email_and_notification(
                 recipient=r,
                 subject=subject,
                 body=body,
-                event_type='HOURLY_WORK_REMINDER',
-                title=subject,
+                event_type=event_type,
+                task=top_task_obj,
+                title=notif_title,
             )
             count += 1
         except Exception as e:
@@ -717,10 +875,77 @@ def dispatch_hourly_work_reminders(user=None):
 
 
 def dispatch_daily_9am_work_reminders(user=None):
-    """
-    Dispatches work update reminder. Forwarded to dispatch_hourly_work_reminders.
-    """
+    """Backward-compatible alias for dispatch_hourly_work_reminders"""
     return dispatch_hourly_work_reminders(user=user)
 
 
+def dispatch_urgent_and_due_date_reminders(user=None):
+    """
+    Specifically scans and dispatches push notifications and emails for tasks
+    that are marked as URGENT priority, or have a due date of TODAY or are OVERDUE.
+    """
+    today = timezone.now().date()
+    tomorrow = today + timezone.timedelta(days=1)
 
+    tasks_qs = Task.objects.exclude(status=Task.STATUS_CLOSED).filter(
+        Q(priority=Task.PRIORITY_URGENT) |
+        Q(due_date__isnull=False, due_date__lte=tomorrow)
+    ).select_related('assigned_to', 'department', 'created_by')
+
+    if user:
+        tasks_qs = tasks_qs.filter(assigned_to=user)
+
+    dispatched = 0
+    items = []
+
+    for task in tasks_qs:
+        assignee = task.assigned_to
+        if not assignee:
+            continue
+
+        if task.due_date and task.due_date < today:
+            diff = (today - task.due_date).days
+            headline = f"🚨 [OVERDUE BY {diff}D] '{task.title}'"
+            urgency = "OVERDUE"
+        elif task.due_date and task.due_date == today:
+            headline = f"⚠️ [DUE TODAY] '{task.title}'"
+            urgency = "DUE_TODAY"
+        else:
+            headline = f"🚨 [URGENT DELIVERABLE] '{task.title}'"
+            urgency = "URGENT"
+
+        body = (
+            f"Hello {assignee.get_full_name() or assignee.username},\n\n"
+            f"⚠️ URGENT TASK REMINDER:\n"
+            f"• Deliverable: #{task.id} {task.title}\n"
+            f"• Department: {task.department.name} ({task.department.code})\n"
+            f"• Priority: {task.get_priority_display()}\n"
+            f"• Target Deadline: {task.due_date or 'Immediate'}\n"
+            f"• Status: {task.get_status_display()}\n\n"
+            f"Please prioritize this task and submit your deliverables before 6:00 PM."
+        )
+
+        try:
+            dispatch_email_and_notification(
+                recipient=assignee,
+                subject=f"{headline} [{task.department.code}]",
+                body=body,
+                event_type='URGENT_TASK_REMINDER',
+                task=task,
+                title=headline,
+            )
+            dispatched += 1
+            items.append({
+                'task_id': task.id,
+                'title': task.title,
+                'urgency': urgency,
+                'due_date': str(task.due_date) if task.due_date else None,
+                'assigned_to': assignee.username,
+            })
+        except Exception as e:
+            print(f"[UrgentReminder] Error dispatching to {assignee}: {e}")
+
+    return {
+        'count': dispatched,
+        'tasks': items,
+    }
