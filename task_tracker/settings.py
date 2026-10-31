@@ -124,6 +124,11 @@ CORS_ALLOW_HEADERS = [
 ]
 
 CSRF_TRUSTED_ORIGINS = [
+    'https://www.rguedu.in',
+    'http://www.rguedu.in',
+    'https://rguedu.in',
+    'http://rguedu.in',
+    'https://*.rguedu.in',
     'https://insight.rathinamtechzone.com',
     'http://insight.rathinamtechzone.com',
     'https://*.rathinamtechzone.com',

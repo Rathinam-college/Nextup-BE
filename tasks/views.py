@@ -1995,7 +1995,7 @@ def get_app_version(request):
     return Response({
         "version": "2.2.5",
         "versionCode": 10,
-        "apkUrl": "https://insight.rathinamtechzone.com/nextup/NextUp.apk",
+        "apkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
         "fallbackApkUrl": "http://192.168.0.101:8090/NextUp.apk",
         "releaseNotes": [
             "Login: Added eye visibility icon to view/hide password",
