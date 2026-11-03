@@ -198,22 +198,27 @@ class TaskViewSet(viewsets.ModelViewSet):
         if not user.is_authenticated:
             return Task.objects.none()
 
-        # Departmental Data Isolation:
-        # GM and Super Admin see all tasks.
-        # Department Manager sees all tasks for their own department (strictly EXCLUDING GM own tasks).
-        # Staff sees all tasks for their own department (strictly EXCLUDING GM own tasks).
+        # Strict Individual Task Isolation:
+        # GM and Super Admin oversee all tasks across the system.
+        # For ALL other users (Staff, Managers, etc.):
+        # A task is strictly visible ONLY to the person it is assigned to (or explicitly co-assigned to).
+        # It must NEVER be shared with or viewed by any other person, even in the same department.
         if not user.is_gm_or_super():
-            # Never show GM own tasks to any staff or department manager
             qs = qs.exclude(
                 Q(is_gm_own_task=True) |
                 Q(assigned_to__role__in=[User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN]) |
                 Q(department__code__iexact='GM') |
                 Q(department__name__icontains='General Management')
             )
-            if user.department:
-                qs = qs.filter(department=user.department)
-            else:
-                qs = qs.filter(assigned_to=user)
+            # Strictly isolate to only tasks where the user is directly assigned or explicitly co-assigned
+            co_filter = (
+                Q(assigned_to=user) |
+                Q(description__icontains=f'"assignedToId": {user.id}') |
+                Q(description__icontains=f'"assignedToId":{user.id}') |
+                Q(description__icontains=f'"staffId": {user.id}') |
+                Q(description__icontains=f'"staffId":{user.id}')
+            )
+            qs = qs.filter(co_filter)
 
         # Filters
         dept_id = self.request.query_params.get('department')
@@ -230,7 +235,11 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         assigned_filter = self.request.query_params.get('assigned_to')
         if assigned_filter:
-            qs = qs.filter(assigned_to_id=assigned_filter)
+            if user.is_gm_or_super():
+                qs = qs.filter(assigned_to_id=assigned_filter)
+            else:
+                if str(assigned_filter) != str(user.id):
+                    return Task.objects.none()
 
         # Staff 'My Tasks' specific filter
         my_tasks = self.request.query_params.get('my_tasks')
@@ -612,10 +621,24 @@ class TaskCommentViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        user = self.request.user
+        if not user.is_authenticated:
+            return TaskComment.objects.none()
+        qs = TaskComment.objects.all().select_related('author', 'task')
+        if not user.is_gm_or_super():
+            # A user can strictly only see notes/comments on tasks assigned or co-assigned to them
+            co_filter = (
+                Q(task__assigned_to=user) |
+                Q(task__description__icontains=f'"assignedToId": {user.id}') |
+                Q(task__description__icontains=f'"assignedToId":{user.id}') |
+                Q(task__description__icontains=f'"staffId": {user.id}') |
+                Q(task__description__icontains=f'"staffId":{user.id}')
+            )
+            qs = qs.filter(co_filter)
         task_id = self.request.query_params.get('task')
         if task_id:
-            return TaskComment.objects.filter(task_id=task_id).select_related('author')
-        return TaskComment.objects.all().select_related('author')
+            qs = qs.filter(task_id=task_id)
+        return qs
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -714,10 +737,8 @@ class ActivityLogViewSet(viewsets.ReadOnlyModelViewSet):
                 Q(department__code__iexact='GM') |
                 Q(department__name__icontains='General Management')
             )
-            if user.department:
-                qs = qs.filter(department=user.department)
-            else:
-                qs = qs.filter(user=user)
+            # Strictly show activities on tasks assigned to the user or actions performed by the user
+            qs = qs.filter(Q(user=user) | Q(task__assigned_to=user))
         return qs.order_by('-timestamp')[:100]
 
 
@@ -950,10 +971,20 @@ def dashboard_stats(request):
     tasks_qs = Task.objects.all()
 
     if not user.is_gm_or_super():
-        if user.department:
-            tasks_qs = tasks_qs.filter(department=user.department)
-        else:
-            tasks_qs = tasks_qs.filter(assigned_to=user)
+        tasks_qs = tasks_qs.exclude(
+            Q(is_gm_own_task=True) |
+            Q(assigned_to__role__in=[User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN]) |
+            Q(department__code__iexact='GM') |
+            Q(department__name__icontains='General Management')
+        )
+        co_filter = (
+            Q(assigned_to=user) |
+            Q(description__icontains=f'"assignedToId": {user.id}') |
+            Q(description__icontains=f'"assignedToId":{user.id}') |
+            Q(description__icontains=f'"staffId": {user.id}') |
+            Q(description__icontains=f'"staffId":{user.id}')
+        )
+        tasks_qs = tasks_qs.filter(co_filter)
 
     total_tasks = tasks_qs.count()
     todo_count = tasks_qs.filter(status=Task.STATUS_TODO).count()
@@ -965,23 +996,18 @@ def dashboard_stats(request):
     dept_stats = []
     if user.is_gm_or_super():
         depts_to_stat = Department.objects.all().order_by('name')
-    elif user.department:
-        depts_to_stat = [user.department]
-    else:
-        depts_to_stat = []
-
-    for dept in depts_to_stat:
-        dept_tasks = Task.objects.filter(department=dept)
-        dept_stats.append({
-            'id': dept.id,
-            'name': dept.name,
-            'code': dept.code,
-            'total': dept_tasks.count(),
-            'pending_gm': dept_tasks.filter(status=Task.STATUS_PENDING_GM_APPROVAL).count(),
-            'in_progress': dept_tasks.filter(status=Task.STATUS_IN_PROGRESS).count(),
-            'closed': dept_tasks.filter(status=Task.STATUS_CLOSED).count(),
-            'members_count': dept.members.filter(is_active=True).count(),
-        })
+        for dept in depts_to_stat:
+            dept_tasks = Task.objects.filter(department=dept)
+            dept_stats.append({
+                'id': dept.id,
+                'name': dept.name,
+                'code': dept.code,
+                'total': dept_tasks.count(),
+                'pending_gm': dept_tasks.filter(status=Task.STATUS_PENDING_GM_APPROVAL).count(),
+                'in_progress': dept_tasks.filter(status=Task.STATUS_IN_PROGRESS).count(),
+                'closed': dept_tasks.filter(status=Task.STATUS_CLOSED).count(),
+                'members_count': dept.members.filter(is_active=True).count(),
+            })
 
     return Response({
         'total_tasks': total_tasks,
@@ -1993,19 +2019,36 @@ def send_test_email(request):
 def get_app_version(request):
     """
     Returns latest mobile app version metadata for automatic in-app updates.
+    Dynamically loads from version.json if available.
     """
+    import json
+    candidate_paths = [
+        os.path.join(settings.BASE_DIR, '..', 'version.json'),
+        os.path.join(settings.BASE_DIR, '..', 'task_tracker_frontend', 'public', 'version.json'),
+        os.path.join(settings.BASE_DIR, '..', 'apk_download', 'version.json'),
+    ]
+    for path in candidate_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if data and isinstance(data, dict) and 'versionCode' in data:
+                        return Response(data)
+            except Exception:
+                pass
+
     return Response({
-        "version": "2.2.5",
-        "versionCode": 10,
+        "version": "2.3.2",
+        "versionCode": 17,
         "apkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
-        "fallbackApkUrl": "http://192.168.0.101:8090/NextUp.apk",
+        "fallbackApkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
         "releaseNotes": [
-            "Login: Added eye visibility icon to view/hide password",
-            "Login: Fixed keyboard view resize & screen jump on typing",
-            "Settings: Modernized profile & app update checker",
-            "UI: Clean executive design and improved responsiveness"
+            "IST Working Hours: Push notifications strictly fire 9:00 AM – 6:00 PM IST",
+            "Complete Task Details: Push alerts now include Priority, Dept, Due Date, Assignee & Description",
+            "In-App Auto Update: Download and install new updates seamlessly directly inside the app",
+            "Share NextUp App: Quick 1-tap sharing of APK download link via WhatsApp and Share sheet"
         ],
-        "publishedAt": "2026-10-24",
+        "publishedAt": "2026-11-03",
         "mandatory": False
     })
 
@@ -2035,24 +2078,27 @@ class RoutineWorkItemViewSet(viewsets.ModelViewSet):
 
         qs = RoutineWorkItem.objects.filter(is_active=True)
 
-        # Non-GM departmental scoping
+        # Strict Routine Work Isolation:
+        # Non-GM users ONLY see routine checklist items assigned to them or created by them.
+        # They never see routine items assigned to other staff or managers.
         if not user.is_gm_or_super():
-            if user.department:
-                qs = qs.filter(Q(department=user.department) | Q(assigned_to=user) | Q(created_by=user))
-            else:
-                qs = qs.filter(Q(assigned_to=user) | Q(created_by=user))
+            qs = qs.filter(Q(assigned_to=user) | Q(created_by=user))
 
         freq = self.request.query_params.get('frequency')
         if freq and freq != 'ALL':
             qs = qs.filter(frequency=freq)
 
         dept = self.request.query_params.get('department')
-        if dept and dept != 'ALL':
+        if dept and dept != 'ALL' and user.is_gm_or_super():
             qs = qs.filter(department_id=dept)
 
         staff = self.request.query_params.get('assigned_to')
         if staff and staff != 'ALL':
-            qs = qs.filter(assigned_to_id=staff)
+            if user.is_gm_or_super():
+                qs = qs.filter(assigned_to_id=staff)
+            else:
+                if str(staff) != str(user.id):
+                    return RoutineWorkItem.objects.none()
 
         return qs.order_by('frequency', 'created_at')
 

@@ -11,6 +11,31 @@ from django.utils import timezone
 from django.db.models import Q
 from .models import Notification, DispatchedEmailLog, ActivityLog, User, Task, TaskComment, UserDevice, UserSessionLog
 
+try:
+    import zoneinfo
+except ImportError:
+    from backports import zoneinfo
+
+
+def get_india_current_time():
+    """Returns the current datetime in India Standard Time (Asia/Kolkata)."""
+    try:
+        india_tz = zoneinfo.ZoneInfo('Asia/Kolkata')
+    except Exception:
+        import pytz
+        india_tz = pytz.timezone('Asia/Kolkata')
+    return timezone.now().astimezone(india_tz)
+
+
+def is_within_india_work_hours():
+    """
+    Checks if current India Standard Time (IST) is strictly within
+    the 9:00 AM to 6:00 PM working window (09:00 through 18:00 IST).
+    """
+    now_ist = get_india_current_time()
+    total_minutes = now_ist.hour * 60 + now_ist.minute
+    return 540 <= total_minutes <= 1080  # 9:00 AM (540m) to 6:00 PM (1080m)
+
 
 def save_task_attachment_image(image_input, task_id=None):
     """
@@ -191,10 +216,11 @@ def record_user_logout(user, request=None):
             logout_time=timezone.now()
         )
 
-def dispatch_email_and_notification(recipient, subject, body, event_type, task=None, title=None):
+def dispatch_email_and_notification(recipient, subject, body, event_type, task=None, title=None, push_title=None, push_body=None, push_data=None):
     """
     Sends email via background thread, records it in DispatchedEmailLog,
-    and creates an in-app Notification for the recipient without delaying API response.
+    creates an in-app Notification, and dispatches a rich push notification
+    containing ALL task details directly to mobile devices.
     """
     if not recipient:
         return None
@@ -238,19 +264,62 @@ def dispatch_email_and_notification(recipient, subject, body, event_type, task=N
         task=task,
     )
 
+    # Determine rich push notification title and body with ALL task details
+    final_push_title = push_title or notif_title
+
+    if push_body:
+        final_push_body = push_body
+    elif task:
+        due_str = str(task.due_date) if task.due_date else "Flexible timeline"
+        dept_str = f"{task.department.name} ({task.department.code})" if task.department else "General"
+        priority_str = task.get_priority_display()
+        status_str = task.get_status_display()
+        raw_desc = (task.description or "").strip()
+        clean_desc = re.sub(r'<!--.*?-->', '', raw_desc).strip()
+        if len(clean_desc) > 180:
+            clean_desc = clean_desc[:180] + "..."
+        if not clean_desc:
+            clean_desc = "No additional instructions provided."
+
+        assigned_by_str = ""
+        if hasattr(task, 'created_by') and task.created_by:
+            assigned_by_str = f" • By: {task.created_by.get_full_name() or task.created_by.username}"
+
+        final_push_body = (
+            f"🎯 Priority: {priority_str} • 📅 Due: {due_str}\n"
+            f"🏢 Dept: {dept_str}{assigned_by_str} • 📊 {status_str}\n"
+            f"📝 {clean_desc}"
+        )
+    else:
+        final_push_body = body[:240]
+
+    merged_push_data = {
+        'taskId': task.id if task else None,
+        'type': event_type,
+        'notificationId': notification.id,
+    }
+    if task:
+        merged_push_data.update({
+            'title': task.title,
+            'priority': task.priority,
+            'department': task.department.code if task.department else 'General',
+            'dueDate': str(task.due_date) if task.due_date else '',
+            'status': task.status,
+            'description': task.description or '',
+            'is_urgent': (task.priority == Task.PRIORITY_URGENT),
+        })
+    if push_data and isinstance(push_data, dict):
+        merged_push_data.update(push_data)
+
     # Dispatch native mobile push notification to recipient's active devices
     try:
         active_tokens = list(recipient.devices.filter(is_active=True).values_list('device_token', flat=True))
         if active_tokens:
             send_expo_push_notification(
                 tokens=active_tokens,
-                title=notif_title,
-                body=body[:220],
-                data={
-                    'taskId': task.id if task else None,
-                    'type': event_type,
-                    'notificationId': notification.id,
-                }
+                title=final_push_title,
+                body=final_push_body,
+                data=merged_push_data
             )
     except Exception as push_err:
         print(f"[ExpoPush] Device lookup error: {push_err}")
@@ -299,23 +368,39 @@ def is_gm_own_task(task):
     return False
 
 
+def get_task_target_recipients(task):
+    """
+    Strict Task Isolation:
+    Returns ONLY the directly assigned individual and explicitly co-assigned team members.
+    Never broadcasts or shares task alerts with other department members or managers.
+    """
+    recipients = set()
+    if task.assigned_to and task.assigned_to.is_active:
+        recipients.add(task.assigned_to)
+
+    import json
+    match = re.search(r'<!-- CO_ASSIGN_TEAM:(.*?) -->', task.description or '')
+    if match:
+        try:
+            team_info = json.loads(match.group(1))
+            for item in team_info:
+                assigned_to_id = item.get('assignedToId') or item.get('staffId')
+                if assigned_to_id:
+                    co_user = User.objects.filter(id=assigned_to_id, is_active=True).first()
+                    if co_user:
+                        recipients.add(co_user)
+        except Exception:
+            pass
+    return recipients
+
+
 def notify_task_assigned(task, assigned_by):
     # GM Own Task: Never send notification or email to anyone
     if is_gm_own_task(task):
         return
 
-    recipients = set()
-    if task.assigned_to:
-        recipients.add(task.assigned_to)
-
-    # Also notify department managers of the new task assignment and timeline
-    dept_managers = User.objects.filter(
-        department=task.department,
-        role=User.ROLE_DEPT_MANAGER,
-        is_active=True
-    ).exclude(id=assigned_by.id)
-    for dm in dept_managers:
-        recipients.add(dm)
+    # Strictly notify only the assigned person and explicitly co-assigned team members
+    recipients = get_task_target_recipients(task)
 
     timeline_str = format_timeline_text(task.due_date)
     subject_prefix = f"[{task.department.code}]"
@@ -324,21 +409,45 @@ def notify_task_assigned(task, assigned_by):
     else:
         subject = f"✉️ {subject_prefix} New Task Assigned: '{task.title}'"
 
+    assigned_by_name = assigned_by.get_full_name() or assigned_by.username
+    due_str = str(task.due_date) if task.due_date else "Flexible timeline"
+    dept_str = f"{task.department.name} ({task.department.code})" if task.department else "General"
+    priority_str = task.get_priority_display()
+    status_str = task.get_status_display()
+
+    # Clean description for mobile push notification
+    raw_desc = (task.description or "").strip()
+    clean_desc = re.sub(r'<!--.*?-->', '', raw_desc).strip()
+    if len(clean_desc) > 200:
+        clean_desc = clean_desc[:200] + "..."
+    if not clean_desc:
+        clean_desc = "No additional instructions provided."
+
+    push_title = f"📋 New Task Assigned: {task.title}"
+    if task.priority == Task.PRIORITY_URGENT:
+        push_title = f"🚨 [URGENT TASK] {task.title}"
+
+    push_body = (
+        f"🎯 Priority: {priority_str} • 📅 Due: {due_str}\n"
+        f"🏢 Dept: {dept_str} • 👤 By: {assigned_by_name}\n"
+        f"📝 {clean_desc}"
+    )
+
     for rec in recipients:
         is_assignee = (task.assigned_to and rec.id == task.assigned_to.id)
         role_note = "You have been assigned to" if is_assignee else f"Staff member '{task.assigned_to.get_full_name() if task.assigned_to else 'Unassigned'}' was assigned to"
 
         body = (
             f"Hello {rec.get_full_name() or rec.username},\n\n"
-            f"{role_note} task '{task.title}' by {assigned_by.get_full_name() or assigned_by.username}.\n\n"
+            f"{role_note} task '{task.title}' by {assigned_by_name}.\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📋 TASK TIMELINE & SPECIFICATIONS:\n"
-            f"• Department: {task.department.name} ({task.department.code})\n"
-            f"• Priority: {task.get_priority_display()}\n"
+            f"• Department: {dept_str}\n"
+            f"• Priority: {priority_str}\n"
             f"• Target Timeline / Due Date: {timeline_str}\n"
-            f"• Current Status: {task.get_status_display()}\n"
+            f"• Current Status: {status_str}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"Description:\n{task.description or 'No additional description provided.'}\n\n"
+            f"Description:\n{clean_desc}\n\n"
             f"Please ensure deliverables are planned and tracked according to this timeline on the Task Tracker portal.\n\n"
             f"Best regards,\nTaskTracker Enterprise Management System"
         )
@@ -348,7 +457,9 @@ def notify_task_assigned(task, assigned_by):
             body=body,
             event_type='TASK_ASSIGNED',
             task=task,
-            title=f"Task Assigned: {task.title} (Due: {task.due_date or 'Flexible'})"
+            title=f"Task Assigned: {task.title} (Due: {task.due_date or 'Flexible'})",
+            push_title=push_title,
+            push_body=push_body,
         )
 
 
@@ -356,17 +467,8 @@ def notify_task_timeline_updated(task, updated_by, old_due_date):
     if is_gm_own_task(task):
         return
 
-    recipients = set()
-    if task.assigned_to:
-        recipients.add(task.assigned_to)
-
-    dept_managers = User.objects.filter(
-        department=task.department,
-        role=User.ROLE_DEPT_MANAGER,
-        is_active=True
-    ).exclude(id=updated_by.id)
-    for dm in dept_managers:
-        recipients.add(dm)
+    # Strictly notify only assigned person and explicitly co-assigned team members
+    recipients = get_task_target_recipients(task)
 
     timeline_str = format_timeline_text(task.due_date)
     subject = f"⏰ [{task.department.code}] Timeline Updated: '{task.title}' (New Deadline: {task.due_date or 'None'})"
@@ -398,17 +500,8 @@ def notify_timeline_reminder(task, triggered_by=None):
     if is_gm_own_task(task):
         return []
 
-    recipients = set()
-    if task.assigned_to:
-        recipients.add(task.assigned_to)
-
-    dept_managers = User.objects.filter(
-        department=task.department,
-        role=User.ROLE_DEPT_MANAGER,
-        is_active=True
-    )
-    for dm in dept_managers:
-        recipients.add(dm)
+    # Strictly notify only assigned person and explicitly co-assigned team members
+    recipients = get_task_target_recipients(task)
 
     if not recipients:
         return []
@@ -515,13 +608,8 @@ def notify_submitted_for_gm_verification(task, submitted_by):
 
 
 def notify_gm_approved(task, gm_user, notes=""):
-    recipients = set()
-    if task.assigned_to:
-        recipients.add(task.assigned_to)
-    # Also notify department manager(s)
-    dept_managers = User.objects.filter(department=task.department, role=User.ROLE_DEPT_MANAGER, is_active=True)
-    for m in dept_managers:
-        recipients.add(m)
+    # Strictly notify only assigned person and explicitly co-assigned team members
+    recipients = get_task_target_recipients(task)
 
     notes_str = f"\nGM Approval Remarks: {notes}\n" if notes else ""
 
@@ -546,12 +634,8 @@ def notify_gm_approved(task, gm_user, notes=""):
 
 
 def notify_gm_changes_requested(task, gm_user, feedback_notes):
-    recipients = set()
-    if task.assigned_to:
-        recipients.add(task.assigned_to)
-    dept_managers = User.objects.filter(department=task.department, role=User.ROLE_DEPT_MANAGER, is_active=True)
-    for m in dept_managers:
-        recipients.add(m)
+    # Strictly notify only assigned person and explicitly co-assigned team members
+    recipients = get_task_target_recipients(task)
 
     for rec in recipients:
         subject = f"✉️ Changes Requested: {task.title}"
@@ -799,12 +883,12 @@ def push_message_to_assigned_staff(task, sender_user, message_text, send_email=T
 
 def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
     """
-    Dispatches 1-hour recurring work check-in reminder during working hours (9:00 AM to 6:00 PM).
-    If user has urgent or due date tasks, the push notification explicitly highlights them!
+    Dispatches 1-hour recurring work check-in reminder during India working hours (9:00 AM to 6:00 PM IST).
+    If user has urgent or due date tasks, the push notification explicitly highlights them with all details!
     """
-    now_local = timezone.localtime(timezone.now())
-    if enforce_work_hours and not (9 <= now_local.hour <= 18):
-        print(f"[HourlyReminder] Outside working hours (Current hour: {now_local.hour}:00). Reminders run between 9:00 AM and 6:00 PM.")
+    now_ist = get_india_current_time()
+    if enforce_work_hours and not is_within_india_work_hours():
+        print(f"[HourlyReminder] Outside India working hours (Current IST: {now_ist.strftime('%I:%M %p')}). Reminders run between 9:00 AM and 6:00 PM IST.")
         return 0
 
     if user:
@@ -812,7 +896,7 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
     else:
         recipients = list(User.objects.filter(is_active=True))
 
-    today = timezone.now().date()
+    today = now_ist.date()
     count = 0
 
     for r in recipients:
@@ -832,10 +916,10 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
                 else:
                     tag = "URGENT PRIORITY"
 
-                subject = f"🚨 [9AM-6PM Check-In] {urgent_count} Urgent / Due Deliverable(s)"
+                subject = f"🚨 [9AM-6PM IST Check-In] {urgent_count} Urgent / Due Deliverable(s)"
                 body = (
                     f"Hello {r.get_full_name() or r.username},\n\n"
-                    f"This is your hourly work check-in (9:00 AM – 6:00 PM Work Hours).\n\n"
+                    f"This is your hourly work check-in ({now_ist.strftime('%I:%M %p')} IST • 9:00 AM – 6:00 PM Work Hours).\n\n"
                     f"⚠️ ATTENTION - PENDING URGENT DELIVERABLE:\n"
                     f"• Task: #{top_task.id} '{top_task.title}'\n"
                     f"• Department: {top_task.department.name} ({top_task.department.code})\n"
@@ -847,16 +931,29 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
                 )
                 event_type = 'HOURLY_WORK_REMINDER'
                 notif_title = f"🚨 [Urgent Task Due] #{top_task.id} {top_task.title}"
+                push_title = f"🚨 [{now_ist.strftime('%I:%M %p')} IST] {urgent_count} Urgent / Due Task(s)"
+                push_body = (
+                    f"⚠️ #{top_task.id} {top_task.title}\n"
+                    f"Priority: {top_task.get_priority_display()} • Due: {top_task.due_date or 'Immediate'} ({tag})\n"
+                    f"Dept: {top_task.department.code if top_task.department else 'General'} • Please update progress!"
+                )
                 top_task_obj = top_task
             else:
-                subject = "⏰ Hourly Work Check-In (9:00 AM – 6:00 PM)"
+                active_count = active_tasks.count()
+                subject = f"⏰ Hourly Work Check-In ({now_ist.strftime('%I:%M %p')} IST)"
                 body = (
                     f"Hello {r.get_full_name() or r.username},\n\n"
-                    f"This is your continuous 1-hour work check-in reminder (9:00 AM - 6:00 PM).\n"
+                    f"This is your continuous 1-hour work check-in reminder (9:00 AM - 6:00 PM IST).\n"
+                    f"Active deliverables: {active_count} tasks in progress.\n"
                     f"Please keep your active tasks, progress reports, and deliverables current."
                 )
                 event_type = 'HOURLY_WORK_REMINDER'
-                notif_title = "⏰ 1-Hour Work Check-In (9 AM - 6 PM)"
+                notif_title = f"⏰ 1-Hour Work Check-In ({now_ist.strftime('%I:%M %p')} IST)"
+                push_title = notif_title
+                push_body = (
+                    f"1-Hour check-in (9:00 AM – 6:00 PM IST).\n"
+                    f"You have {active_count} active task(s) in progress. Please review and update deliverables on NextUp."
+                )
                 top_task_obj = None
 
             dispatch_email_and_notification(
@@ -866,6 +963,8 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
                 event_type=event_type,
                 task=top_task_obj,
                 title=notif_title,
+                push_title=push_title,
+                push_body=push_body,
             )
             count += 1
         except Exception as e:
