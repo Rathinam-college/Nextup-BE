@@ -2184,19 +2184,41 @@ def get_app_version(request):
                 pass
 
     return Response({
-        "version": "2.3.2",
-        "versionCode": 17,
+        "version": "2.4.1",
+        "versionCode": 20,
         "apkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
-        "fallbackApkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
+        "fallbackApkUrl": "https://www.rguedu.in/nextup/api/download-apk/",
         "releaseNotes": [
-            "IST Working Hours: Push notifications strictly fire 9:00 AM – 6:00 PM IST",
-            "Complete Task Details: Push alerts now include Priority, Dept, Due Date, Assignee & Description",
-            "In-App Auto Update: Download and install new updates seamlessly directly inside the app",
-            "Share NextUp App: Quick 1-tap sharing of APK download link via WhatsApp and Share sheet"
+            "Multi-Attachment Support: Upload and view multiple documents (Images, PDF, Excel sheets) together in one task",
+            "Discussion Input Fix: Comment input bar and typed text are fully visible above the keyboard with auto-scroll",
+            "In-App Staff Creation: Super Admin, GM, and Dept Managers can create user/staff accounts directly within mobile",
+            "Instant Live Sync: Automated background auto-fetch every 6–8s and foreground app resume sync"
         ],
-        "publishedAt": "2026-11-03",
+        "publishedAt": "2026-11-04",
         "mandatory": False
     })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def download_latest_apk(request):
+    """
+    Direct APK file download endpoint as a guaranteed fail-safe for in-app updates.
+    """
+    from django.http import FileResponse, Http404
+    candidate_paths = [
+        os.path.join(settings.BASE_DIR, '..', 'task_tracker_frontend', 'public', 'NextUp.apk'),
+        os.path.join(settings.BASE_DIR, '..', 'task_tracker_frontend', 'dist', 'NextUp.apk'),
+        os.path.join(settings.BASE_DIR, '..', 'apk_download', 'NextUp.apk'),
+        os.path.join(settings.BASE_DIR, '..', 'NextUp.apk'),
+    ]
+    for path in candidate_paths:
+        if os.path.exists(path) and os.path.getsize(path) > 1000000:
+            response = FileResponse(open(path, 'rb'), content_type='application/vnd.android.package-archive')
+            response['Content-Disposition'] = 'attachment; filename="NextUp.apk"'
+            response['Content-Length'] = os.path.getsize(path)
+            return response
+    raise Http404("APK file not found on server")
 
 
 

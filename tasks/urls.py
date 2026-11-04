@@ -13,7 +13,7 @@ from .views import (
     backup_database_sql, backup_database_json,
     restore_database_sql, restore_database_json,
     admin_system_stats, clear_database, get_email_status, send_test_email,
-    update_email_settings, get_app_version,
+    update_email_settings, get_app_version, download_latest_apk,
     register_device, test_push_notification, admin_user_sessions, ping_user_activity
 )
 
@@ -51,5 +51,6 @@ urlpatterns = [
     path('admin/user-sessions/', admin_user_sessions, name='admin_user_sessions'),
     path('auth/ping/', ping_user_activity, name='ping_user_activity'),
     path('app-version/', get_app_version, name='app-version'),
+    path('download-apk/', download_latest_apk, name='download-latest-apk'),
     path('', include(router.urls)),
 ]
