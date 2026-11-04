@@ -264,15 +264,42 @@ class TaskViewSet(viewsets.ModelViewSet):
         elif dept and (dept.code.upper() == 'GM' or 'general management' in dept.name.lower()):
             is_gm_own = True
 
-        # Handle attachment image: save to media folder if uploaded
-        raw_attachment = (
-            self.request.FILES.get('attachment_image') or
-            self.request.FILES.get('image') or
-            serializer.validated_data.get('attachment_image') or
-            self.request.data.get('attachment_image') or
-            self.request.data.get('image')
+        # Handle attachment image/documents: save to media folder if uploaded
+        new_saved_urls = []
+        files = (
+            self.request.FILES.getlist('files') or
+            self.request.FILES.getlist('attachments') or
+            self.request.FILES.getlist('attachment_images') or
+            self.request.FILES.getlist('attachment_image')
         )
-        saved_media_url = save_task_attachment_image(raw_attachment) if raw_attachment else ''
+        if not files:
+            single_f = self.request.FILES.get('attachment_image') or self.request.FILES.get('image')
+            if single_f:
+                files = [single_f]
+
+        for f in files:
+            saved = save_task_attachment_image(f)
+            if saved:
+                new_saved_urls.append(saved)
+
+        attachments_input = self.request.data.get('attachments')
+        if isinstance(attachments_input, list):
+            for item in attachments_input:
+                saved = save_task_attachment_image(item)
+                if saved:
+                    new_saved_urls.append(saved)
+        else:
+            raw_attachment = (
+                serializer.validated_data.get('attachment_image') or
+                self.request.data.get('attachment_image') or
+                self.request.data.get('image')
+            )
+            if raw_attachment and isinstance(raw_attachment, str) and raw_attachment.strip():
+                saved = save_task_attachment_image(raw_attachment.strip())
+                if saved:
+                    new_saved_urls.append(saved)
+
+        saved_media_url = serialize_attachments_list(new_saved_urls)
 
         task = serializer.save(created_by=user, department=dept, is_gm_own_task=is_gm_own, attachment_image=saved_media_url)
 
@@ -303,20 +330,57 @@ class TaskViewSet(viewsets.ModelViewSet):
         if new_status == Task.STATUS_CLOSED and not user.is_gm_or_super():
             raise PermissionDenied("Exclusive GM sign-off required: Only GM can close tasks.")
 
-        raw_attachment = (
-            self.request.FILES.get('attachment_image') or
-            self.request.FILES.get('image') or
-            serializer.validated_data.get('attachment_image') or
-            self.request.data.get('attachment_image') or
-            self.request.data.get('image')
+        existing_attachments = parse_attachments_list(task.attachment_image)
+
+        # Check for explicitly uploaded new files or attachments
+        new_files = (
+            self.request.FILES.getlist('files') or
+            self.request.FILES.getlist('attachments') or
+            self.request.FILES.getlist('attachment_images') or
+            self.request.FILES.getlist('attachment_image')
         )
-        if raw_attachment:
-            saved_media_url = save_task_attachment_image(raw_attachment, task_id=task.id)
-            updated_task = serializer.save(attachment_image=saved_media_url)
-        elif raw_attachment == '':
+        if not new_files:
+            single_f = self.request.FILES.get('attachment_image') or self.request.FILES.get('image')
+            if single_f:
+                new_files = [single_f]
+
+        new_saved_urls = []
+        for f in new_files:
+            saved = save_task_attachment_image(f, task_id=task.id)
+            if saved:
+                new_saved_urls.append(saved)
+
+        attachments_input = self.request.data.get('attachments')
+        if isinstance(attachments_input, list):
+            explicit_urls = []
+            for item in attachments_input:
+                if isinstance(item, str) and item.strip():
+                    if item.startswith('data:'):
+                        saved = save_task_attachment_image(item, task_id=task.id)
+                        if saved:
+                            explicit_urls.append(saved)
+                    else:
+                        explicit_urls.append(item.strip())
+            updated_task = serializer.save(attachment_image=serialize_attachments_list(explicit_urls))
+        elif new_saved_urls:
+            combined = existing_attachments + new_saved_urls
+            updated_task = serializer.save(attachment_image=serialize_attachments_list(combined))
+        elif self.request.data.get('attachment_image') == '':
             updated_task = serializer.save(attachment_image='')
+        elif 'attachment_image' in self.request.data and isinstance(self.request.data.get('attachment_image'), str):
+            single_val = self.request.data.get('attachment_image', '').strip()
+            if single_val.startswith('data:'):
+                saved = save_task_attachment_image(single_val, task_id=task.id)
+                if saved:
+                    combined = existing_attachments + [saved]
+                    updated_task = serializer.save(attachment_image=serialize_attachments_list(combined))
+                else:
+                    updated_task = serializer.save(attachment_image=task.attachment_image)
+            else:
+                # Existing attachment reference or URL passed back - preserve all previous documents!
+                updated_task = serializer.save(attachment_image=task.attachment_image)
         else:
-            updated_task = serializer.save()
+            updated_task = serializer.save(attachment_image=task.attachment_image)
 
         # If assignment changed, notify new assignee
         if updated_task.assigned_to and updated_task.assigned_to != old_assigned:
@@ -366,7 +430,11 @@ class TaskViewSet(viewsets.ModelViewSet):
         task.status = Task.STATUS_IN_PROGRESS
         image_data = request.FILES.get('attachment_image') or request.FILES.get('image') or request.data.get('attachment_image') or request.data.get('image')
         if image_data:
-            task.attachment_image = save_task_attachment_image(image_data, task_id=task.id)
+            saved = save_task_attachment_image(image_data, task_id=task.id)
+            if saved:
+                existing = parse_attachments_list(task.attachment_image)
+                existing.append(saved)
+                task.attachment_image = serialize_attachments_list(existing)
         task.save()
         log_activity(request.user, "STARTED_TASK", f"Started work on '{task.title}'", task=task)
         return Response(TaskSerializer(task, context={'request': request}).data)
@@ -377,7 +445,11 @@ class TaskViewSet(viewsets.ModelViewSet):
         task.status = Task.STATUS_PENDING_GM_APPROVAL
         image_data = request.FILES.get('attachment_image') or request.FILES.get('image') or request.data.get('attachment_image') or request.data.get('image')
         if image_data:
-            task.attachment_image = save_task_attachment_image(image_data, task_id=task.id)
+            saved = save_task_attachment_image(image_data, task_id=task.id)
+            if saved:
+                existing = parse_attachments_list(task.attachment_image)
+                existing.append(saved)
+                task.attachment_image = serialize_attachments_list(existing)
         task.save()
         notify_submitted_for_gm_verification(task, request.user)
         log_activity(request.user, "SUBMITTED_TASK_FOR_APPROVAL", f"Submitted task '{task.title}' for GM verification", task=task)
