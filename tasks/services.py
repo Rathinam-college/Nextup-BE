@@ -4,6 +4,7 @@ import re
 import time
 import uuid
 import threading
+from urllib.parse import unquote
 import requests
 from django.core.mail import send_mail
 from django.conf import settings
@@ -39,9 +40,15 @@ def is_within_india_work_hours():
 
 def save_task_attachment_image(image_input, task_id=None):
     """
-    Saves an uploaded image (Base64 data URI, raw base64, or UploadedFile)
+    Saves an uploaded file or image (Base64 data URI, raw base64, or UploadedFile)
     into the server media folder: media/task_attachments/
     and returns its clean URL path: /media/task_attachments/<filename>.
+    
+    Supports:
+    - Photos & Images: .jpg, .jpeg, .png, .webp, .gif
+    - Documents: .pdf
+    - Spreadsheets: .xlsx, .xls, .csv
+    - Documents: .docx, .doc, .txt
     
     If image_input is already a saved URL, it is returned unchanged.
     If image_input is empty, returns empty string.
@@ -66,11 +73,20 @@ def save_task_attachment_image(image_input, task_id=None):
     unique_suffix = uuid.uuid4().hex[:8]
     id_prefix = f"task_{task_id}" if task_id else "task"
 
+    allowed_exts = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf', '.xlsx', '.xls', '.csv', '.doc', '.docx', '.txt']
+
     # Case 1: UploadedFile (multipart/form-data upload)
     if hasattr(image_input, 'read') and hasattr(image_input, 'name'):
         ext = os.path.splitext(image_input.name)[1].lower() or '.jpg'
-        if ext not in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
-            ext = '.jpg'
+        if ext not in allowed_exts:
+            if 'pdf' in ext:
+                ext = '.pdf'
+            elif 'xls' in ext or 'sheet' in ext:
+                ext = '.xlsx'
+            elif 'csv' in ext:
+                ext = '.csv'
+            else:
+                ext = '.jpg'
         filename = f"{id_prefix}_{timestamp}_{unique_suffix}{ext}"
         file_path = os.path.join(target_dir, filename)
         try:
@@ -79,43 +95,68 @@ def save_task_attachment_image(image_input, task_id=None):
                     dest.write(chunk)
             return f"/media/task_attachments/{filename}"
         except Exception as e:
-            print(f"⚠️ Error saving UploadedFile image: {e}")
+            print(f"⚠️ Error saving UploadedFile: {e}")
             return ""
 
-    # Case 2: Base64 String (data:image/...;base64,...)
+    # Case 2: Base64 String (data:...;base64,...)
     if isinstance(image_input, str):
         data_str = image_input.strip()
         ext = '.jpg'
         base64_content = data_str
 
-        # Parse data URL scheme e.g. "data:image/png;base64,..."
-        match = re.match(r'^data:image/([a-zA-Z0-9\+\-]+);base64,(.+)$', data_str, re.DOTALL)
-        if match:
-            raw_ext = match.group(1).lower()
-            if raw_ext in ['jpeg', 'jpg']:
-                ext = '.jpg'
-            elif raw_ext == 'png':
-                ext = '.png'
-            elif raw_ext == 'webp':
-                ext = '.webp'
-            elif raw_ext == 'gif':
-                ext = '.gif'
-            else:
-                ext = '.jpg'
-            base64_content = match.group(2)
+        # Parse data URL scheme e.g. "data:application/pdf;base64,...", "data:application/pdf;name=myfile.pdf;base64,..."
+        # or "data:image/png;base64,..."
+        header_match = re.match(r'^data:([^;]+)(?:;name=([^;]+))?;base64,(.+)$', data_str, re.DOTALL)
+        if not header_match:
+            header_match = re.match(r'^data:([^,]+),(.+)$', data_str, re.DOTALL)
+
+        if header_match:
+            mime = header_match.group(1).lower()
+            orig_name = header_match.group(2) if len(header_match.groups()) >= 3 and header_match.group(2) else ''
+            base64_content = header_match.group(header_match.lastindex)
+
+            # Try to resolve ext from filename if provided
+            if orig_name:
+                orig_ext = os.path.splitext(unquote(orig_name))[1].lower()
+                if orig_ext in allowed_exts:
+                    ext = orig_ext
+
+            if ext == '.jpg':
+                if 'pdf' in mime:
+                    ext = '.pdf'
+                elif 'spreadsheet' in mime or 'xlsx' in mime or 'openxmlformats' in mime:
+                    ext = '.xlsx'
+                elif 'ms-excel' in mime or 'xls' in mime:
+                    ext = '.xls'
+                elif 'csv' in mime:
+                    ext = '.csv'
+                elif 'png' in mime:
+                    ext = '.png'
+                elif 'webp' in mime:
+                    ext = '.webp'
+                elif 'gif' in mime:
+                    ext = '.gif'
+                elif 'word' in mime or 'docx' in mime:
+                    ext = '.docx'
+                elif 'jpeg' in mime or 'jpg' in mime:
+                    ext = '.jpg'
+                elif 'text/plain' in mime:
+                    ext = '.txt'
+                elif 'application' in mime:
+                    ext = '.pdf'
         elif data_str.startswith('data:') and ';base64,' in data_str:
             parts = data_str.split(';base64,', 1)
             base64_content = parts[1]
 
         try:
-            image_bytes = base64.b64decode(base64_content)
+            file_bytes = base64.b64decode(base64_content)
             filename = f"{id_prefix}_{timestamp}_{unique_suffix}{ext}"
             file_path = os.path.join(target_dir, filename)
             with open(file_path, 'wb') as f:
-                f.write(image_bytes)
+                f.write(file_bytes)
             return f"/media/task_attachments/{filename}"
         except Exception as e:
-            print(f"⚠️ Error decoding and saving base64 image: {e}")
+            print(f"⚠️ Error decoding and saving base64 attachment: {e}")
             return data_str
 
     return ""
