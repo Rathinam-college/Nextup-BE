@@ -37,6 +37,7 @@ from .services import (
     notify_task_timeline_updated, notify_timeline_reminder,
     check_and_dispatch_all_timeline_reminders, send_test_email_verification,
     push_message_to_assigned_staff, save_task_attachment_image,
+    parse_attachments_list, serialize_attachments_list,
     send_expo_push_notification, record_user_login, record_user_logout
 )
 
@@ -385,16 +386,89 @@ class TaskViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post', 'patch'], url_path='attach-image')
     def attach_image(self, request, pk=None):
         task = self.get_object()
-        image_data = request.FILES.get('attachment_image') or request.FILES.get('image') or request.data.get('attachment_image') or request.data.get('image') or ''
-        if image_data:
-            task.attachment_image = save_task_attachment_image(image_data, task_id=task.id)
-        else:
+        action_type = request.data.get('action')  # 'add', 'remove', 'clear', 'replace'
+        remove_url = request.data.get('remove_url') or request.data.get('url')
+
+        existing_attachments = parse_attachments_list(task.attachment_image)
+
+        # Handle removing a specific attachment
+        if action_type == 'remove' or remove_url:
+            target_to_remove = (remove_url or '').strip()
+            target_basename = os.path.basename(target_to_remove)
+            updated_attachments = [
+                att for att in existing_attachments
+                if att.strip() != target_to_remove and os.path.basename(att.strip()) != target_basename
+            ]
+            task.attachment_image = serialize_attachments_list(updated_attachments)
+            task.save()
+            log_activity(
+                request.user,
+                "UPDATED_ATTACHMENT",
+                f"Removed attachment from task '{task.title}'",
+                task=task
+            )
+            return Response(TaskSerializer(task, context={'request': request}).data)
+
+        # Handle clearing all attachments
+        if action_type == 'clear':
             task.attachment_image = ''
+            task.save()
+            log_activity(
+                request.user,
+                "UPDATED_ATTACHMENT",
+                f"Removed all attachments from task '{task.title}'",
+                task=task
+            )
+            return Response(TaskSerializer(task, context={'request': request}).data)
+
+        # Collect new files or Base64 data URIs
+        new_saved_urls = []
+
+        # Check multipart uploaded files list
+        files = (
+            request.FILES.getlist('files') or
+            request.FILES.getlist('attachments') or
+            request.FILES.getlist('attachment_images') or
+            request.FILES.getlist('attachment_image')
+        )
+        if not files:
+            single_f = request.FILES.get('attachment_image') or request.FILES.get('image')
+            if single_f:
+                files = [single_f]
+
+        for f in files:
+            saved = save_task_attachment_image(f, task_id=task.id)
+            if saved:
+                new_saved_urls.append(saved)
+
+        # Check JSON or form body for attachments list or single base64
+        attachments_input = request.data.get('attachments')
+        if isinstance(attachments_input, list):
+            for item in attachments_input:
+                saved = save_task_attachment_image(item, task_id=task.id)
+                if saved:
+                    new_saved_urls.append(saved)
+        else:
+            single_data = request.data.get('attachment_image') or request.data.get('image')
+            if single_data and isinstance(single_data, str) and single_data.strip():
+                saved = save_task_attachment_image(single_data.strip(), task_id=task.id)
+                if saved:
+                    new_saved_urls.append(saved)
+
+        if action_type == 'replace':
+            task.attachment_image = serialize_attachments_list(new_saved_urls)
+        elif new_saved_urls:
+            # Default is append: combine existing attachments with new ones!
+            combined = existing_attachments + new_saved_urls
+            task.attachment_image = serialize_attachments_list(combined)
+        elif request.data.get('attachment_image') == '':
+            task.attachment_image = ''
+
         task.save()
         log_activity(
             request.user,
             "UPDATED_ATTACHMENT",
-            f"{'Attached image to' if task.attachment_image else 'Removed image from'} task '{task.title}'",
+            f"Attached {len(new_saved_urls)} file(s) to task '{task.title}'",
             task=task
         )
         return Response(TaskSerializer(task, context={'request': request}).data)

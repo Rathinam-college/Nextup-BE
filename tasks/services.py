@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import re
 import time
@@ -36,6 +37,46 @@ def is_within_india_work_hours():
     now_ist = get_india_current_time()
     total_minutes = now_ist.hour * 60 + now_ist.minute
     return 540 <= total_minutes <= 1080  # 9:00 AM (540m) to 6:00 PM (1080m)
+
+
+def parse_attachments_list(raw_value):
+    """
+    Parses a stored attachment_image field into a clean list of URLs/paths.
+    Supports JSON arrays, newline/comma-separated strings, and single URLs.
+    """
+    if not raw_value:
+        return []
+    val = raw_value.strip() if isinstance(raw_value, str) else ''
+    if not val:
+        return []
+    if val.startswith('[') and val.endswith(']'):
+        try:
+            parsed = json.loads(val)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        except Exception:
+            pass
+    if '\n' in val:
+        return [x.strip() for x in val.split('\n') if x.strip()]
+    if ',' in val:
+        return [x.strip() for x in val.split(',') if x.strip()]
+    return [val]
+
+
+def serialize_attachments_list(attachments_list):
+    """
+    Serializes a list of attachment URLs into a single string for storage.
+    Filters out duplicates and empty strings.
+    """
+    if not attachments_list:
+        return ''
+    clean_list = []
+    for item in attachments_list:
+        if isinstance(item, str) and item.strip() and item.strip() not in clean_list:
+            clean_list.append(item.strip())
+    if not clean_list:
+        return ''
+    return json.dumps(clean_list)
 
 
 def save_task_attachment_image(image_input, task_id=None):

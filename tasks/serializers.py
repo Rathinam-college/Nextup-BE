@@ -3,6 +3,7 @@ from .models import (
     Department, User, Task, TaskComment, Notification, DispatchedEmailLog, ActivityLog,
     SelfTask, SelfNote, UserDevice, UserSessionLog, RoutineWorkItem, RoutineWorkLog
 )
+from .services import parse_attachments_list
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -113,6 +114,7 @@ class TaskSerializer(serializers.ModelSerializer):
 
     attachment_image = serializers.CharField(required=False, allow_blank=True, allow_null=True, default='')
     image = serializers.CharField(source='attachment_image', required=False, allow_blank=True, allow_null=True, default='')
+    attachments = serializers.ListField(child=serializers.CharField(), read_only=True, default=list)
 
     class Meta:
         model = Task
@@ -121,7 +123,7 @@ class TaskSerializer(serializers.ModelSerializer):
             'assigned_to', 'assigned_to_name', 'assigned_to_email', 'assigned_to_phone', 'created_by', 'created_by_name',
             'priority', 'priority_display', 'status', 'status_display', 'due_date',
             'gm_feedback_notes', 'verified_by', 'verified_by_name', 'closed_at',
-            'attachment_image', 'image', 'is_gm_own_task',
+            'attachment_image', 'image', 'attachments', 'is_gm_own_task',
             'created_at', 'updated_at', 'comments'
         ]
         read_only_fields = ['created_by', 'verified_by', 'closed_at', 'created_at', 'updated_at']
@@ -170,26 +172,32 @@ class TaskSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
-        raw_img = ret.get('attachment_image')
-        if raw_img and not raw_img.startswith('data:'):
-            clean_path = raw_img.strip()
-            # If it contains a full URL, strip the old scheme and domain to extract the relative media path
+        request = self.context.get('request')
+
+        raw_val = instance.attachment_image or ''
+        raw_list = parse_attachments_list(raw_val)
+
+        formatted_list = []
+        for raw_item in raw_list:
+            if not raw_item:
+                continue
+            clean_path = raw_item.strip()
+            if clean_path.startswith('data:'):
+                formatted_list.append(clean_path)
+                continue
+
             if '://' in clean_path:
                 from urllib.parse import urlparse
-                parsed = urlparse(clean_path)
-                clean_path = parsed.path
+                clean_path = urlparse(clean_path).path
 
-            # Ensure leading slash
             if not clean_path.startswith('/'):
                 clean_path = '/' + clean_path
 
-            # Extract sub_path relative to /media/
             if '/media/' in clean_path:
                 sub_path = clean_path[clean_path.index('/media/') + len('/media/'):]
             else:
                 sub_path = clean_path.lstrip('/')
 
-            request = self.context.get('request')
             if request:
                 host = request.get_host()
                 if host in ['127.0.0.1', 'localhost', 'backend', '127.0.0.1:8000', '127.0.0.1:8007']:
@@ -200,14 +208,15 @@ class TaskSerializer(serializers.ModelSerializer):
                     scheme = forwarded_proto if forwarded_proto else ('https' if request.is_secure() else 'http')
                     if 'rguedu.in' in host or 'rathinamtechzone.com' in host:
                         scheme = 'https'
-
                 full_url = f"{scheme}://{host}/nextup/api/media/{sub_path}"
-                ret['attachment_image'] = full_url
-                ret['image'] = full_url
             else:
                 full_url = f"https://www.rguedu.in/nextup/api/media/{sub_path}"
-                ret['attachment_image'] = full_url
-                ret['image'] = full_url
+            formatted_list.append(full_url)
+
+        ret['attachments'] = formatted_list
+        primary_url = formatted_list[0] if formatted_list else ''
+        ret['attachment_image'] = primary_url
+        ret['image'] = primary_url
         return ret
 
 
