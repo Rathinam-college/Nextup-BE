@@ -2184,17 +2184,17 @@ def get_app_version(request):
                 pass
 
     return Response({
-        "version": "2.4.1",
-        "versionCode": 20,
+        "version": "2.4.2",
+        "versionCode": 21,
         "apkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
-        "fallbackApkUrl": "https://www.rguedu.in/nextup/api/download-apk/",
+        "fallbackApkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
         "releaseNotes": [
-            "Multi-Attachment Support: Upload and view multiple documents (Images, PDF, Excel sheets) together in one task",
-            "Discussion Input Fix: Comment input bar and typed text are fully visible above the keyboard with auto-scroll",
-            "In-App Staff Creation: Super Admin, GM, and Dept Managers can create user/staff accounts directly within mobile",
-            "Instant Live Sync: Automated background auto-fetch every 6–8s and foreground app resume sync"
+            "Production Server Lock: App permanently connects directly to https://www.rguedu.in/nextup on all networks",
+            "Cleaned Legacy Cache: Automatically purges dead local IP addresses from storage",
+            "Enhanced In-App Updater: Fast, resilient auto-download and background package installer",
+            "Multi-Attachment Support: Upload and view multiple documents (Images, PDF, Excel sheets) in one task"
         ],
-        "publishedAt": "2026-11-04",
+        "publishedAt": "2026-11-05",
         "mandatory": False
     })
 
