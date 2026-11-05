@@ -114,7 +114,7 @@ def save_task_attachment_image(image_input, task_id=None):
     unique_suffix = uuid.uuid4().hex[:8]
     id_prefix = f"task_{task_id}" if task_id else "task"
 
-    allowed_exts = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf', '.xlsx', '.xls', '.csv', '.doc', '.docx', '.txt']
+    allowed_exts = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf', '.xlsx', '.xls', '.csv', '.ppt', '.pptx', '.doc', '.docx', '.txt']
 
     # Case 1: UploadedFile (multipart/form-data upload)
     if hasattr(image_input, 'read') and hasattr(image_input, 'name'):
@@ -122,6 +122,10 @@ def save_task_attachment_image(image_input, task_id=None):
         if ext not in allowed_exts:
             if 'pdf' in ext:
                 ext = '.pdf'
+            elif 'pptx' in ext or 'presentation' in ext or 'powerpoint' in ext:
+                ext = '.pptx'
+            elif 'ppt' in ext:
+                ext = '.ppt'
             elif 'xls' in ext or 'sheet' in ext:
                 ext = '.xlsx'
             elif 'csv' in ext:
@@ -165,6 +169,10 @@ def save_task_attachment_image(image_input, task_id=None):
             if ext == '.jpg':
                 if 'pdf' in mime:
                     ext = '.pdf'
+                elif 'presentation' in mime or 'powerpoint' in mime or 'pptx' in mime:
+                    ext = '.pptx'
+                elif 'ppt' in mime:
+                    ext = '.ppt'
                 elif 'spreadsheet' in mime or 'xlsx' in mime or 'openxmlformats' in mime:
                     ext = '.xlsx'
                 elif 'ms-excel' in mime or 'xls' in mime:

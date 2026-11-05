@@ -2184,15 +2184,15 @@ def get_app_version(request):
                 pass
 
     return Response({
-        "version": "2.4.2",
-        "versionCode": 21,
+        "version": "2.4.3",
+        "versionCode": 22,
         "apkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
         "fallbackApkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
         "releaseNotes": [
-            "Production Server Lock: App permanently connects directly to https://www.rguedu.in/nextup on all networks",
-            "Cleaned Legacy Cache: Automatically purges dead local IP addresses from storage",
-            "Enhanced In-App Updater: Fast, resilient auto-download and background package installer",
-            "Multi-Attachment Support: Upload and view multiple documents (Images, PDF, Excel sheets) in one task"
+            "Task Modal Crash Fix: Fixed crash when tapping any task in the task list",
+            "PowerPoint Presentation Support: Upload, view, and manage .ppt and .pptx slides across web and mobile",
+            "Multi-Attachment Support: Upload photos, PDFs, Excel sheets, and PowerPoint presentations in tasks",
+            "Production Server Lock: Permanently direct connection to https://www.rguedu.in/nextup"
         ],
         "publishedAt": "2026-11-05",
         "mandatory": False
