@@ -2184,12 +2184,12 @@ def get_app_version(request):
                 pass
 
     return Response({
-        "version": "2.4.3",
-        "versionCode": 22,
+        "version": "2.4.4",
+        "versionCode": 23,
         "apkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
         "fallbackApkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
         "releaseNotes": [
-            "Task Modal Crash Fix: Fixed crash when tapping any task in the task list",
+            "Task Crash Fix: Eliminated 'Next Up keeps stopping' modal crash on Android with ErrorBoundary & safe rendering",
             "PowerPoint Presentation Support: Upload, view, and manage .ppt and .pptx slides across web and mobile",
             "Multi-Attachment Support: Upload photos, PDFs, Excel sheets, and PowerPoint presentations in tasks",
             "Production Server Lock: Permanently direct connection to https://www.rguedu.in/nextup"
