@@ -215,15 +215,20 @@ def save_task_attachment_image(image_input, task_id=None):
 def _async_send_mail(subject, body, from_email, recipient_email):
     """Worker function executed in background thread to avoid blocking concurrent web requests."""
     try:
+        sender = getattr(settings, 'EMAIL_HOST_USER', '') or getattr(settings, 'DEFAULT_FROM_EMAIL', '') or from_email
+        if not recipient_email or '@tasktracker.enterprise' in recipient_email:
+            print(f"[Email] Skipping non-routable simulation recipient: {recipient_email}")
+            return
         send_mail(
             subject=subject,
             message=body,
-            from_email=from_email,
+            from_email=sender,
             recipient_list=[recipient_email],
-            fail_silently=True,
+            fail_silently=False,
         )
+        print(f"[Email] Successfully dispatched assignment email to {recipient_email}")
     except Exception as e:
-        print(f"⚠️ Email dispatch notification for {recipient_email}: {e}")
+        print(f"⚠️ Email dispatch notification error for {recipient_email}: {e}")
 
 
 
@@ -449,12 +454,16 @@ def format_timeline_text(due_date):
 def is_gm_own_task(task):
     if not task:
         return False
+    # If explicitly flagged as GM own task
     if getattr(task, 'is_gm_own_task', False):
+        # But if assigned to a regular staff member, it is a delegated task to staff, not a private GM task
+        if task.assigned_to and getattr(task.assigned_to, 'role', '') not in [User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN]:
+            return False
         return True
     if task.assigned_to and getattr(task.assigned_to, 'role', '') in [User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN]:
-        return True
-    if getattr(task, 'department', None) and (getattr(task.department, 'code', '').upper() == 'GM' or 'general management' in getattr(task.department, 'name', '').lower()):
-        return True
+        # Only GM own task if there are NO co-assigned team members
+        if '<!-- CO_ASSIGN_TEAM:' not in (getattr(task, 'description', '') or ''):
+            return True
     return False
 
 
@@ -491,15 +500,17 @@ def notify_task_assigned(task, assigned_by):
 
     # Strictly notify only the assigned person and explicitly co-assigned team members
     recipients = get_task_target_recipients(task)
+    if not recipients and task.assigned_to and task.assigned_to.is_active:
+        recipients = {task.assigned_to}
 
     timeline_str = format_timeline_text(task.due_date)
-    subject_prefix = f"[{task.department.code}]"
+    subject_prefix = f"[{task.department.code}]" if (task.department and getattr(task.department, 'code', None)) else "[NextUp]"
     if task.due_date:
         subject = f"✉️ {subject_prefix} New Task & Timeline: '{task.title}' (Due: {task.due_date})"
     else:
         subject = f"✉️ {subject_prefix} New Task Assigned: '{task.title}'"
 
-    assigned_by_name = assigned_by.get_full_name() or assigned_by.username
+    assigned_by_name = (assigned_by.get_full_name() or assigned_by.username) if assigned_by else "Management"
     due_str = str(task.due_date) if task.due_date else "Flexible timeline"
     dept_str = f"{task.department.name} ({task.department.code})" if task.department else "General"
     priority_str = task.get_priority_display()

@@ -258,11 +258,13 @@ class TaskViewSet(viewsets.ModelViewSet):
         assigned_to = serializer.validated_data.get('assigned_to')
         is_gm_own = serializer.validated_data.get('is_gm_own_task', False)
 
-        # Auto-detect GM own task: if assigned to GM/SuperAdmin, or in GM department, or explicitly flagged
-        if assigned_to and assigned_to.role in [User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN]:
+        # Auto-detect GM own task: only if explicitly flagged or assigned to GM without staff assignees
+        if is_gm_own:
             is_gm_own = True
-        elif dept and (dept.code.upper() == 'GM' or 'general management' in dept.name.lower()):
+        elif assigned_to and assigned_to.role in [User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN] and '<!-- CO_ASSIGN_TEAM:' not in (serializer.validated_data.get('description') or ''):
             is_gm_own = True
+        else:
+            is_gm_own = False
 
         # Handle attachment image/documents: save to media folder if uploaded
         new_saved_urls = []
@@ -303,9 +305,13 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         task = serializer.save(created_by=user, department=dept, is_gm_own_task=is_gm_own, attachment_image=saved_media_url)
 
-        # If it's a GM own task, NEVER notify staff or department managers!
-        if task.assigned_to and not task.is_gm_own_task:
-            notify_task_assigned(task, user)
+        # Automatic email dispatch on task creation:
+        # Immediately notify assigned staff member and all co-assigned team members
+        if not task.is_gm_own_task:
+            try:
+                notify_task_assigned(task, user)
+            except Exception as e:
+                print(f"[perform_create] Warning in auto-email dispatch: {e}")
 
         log_activity(
             user,
