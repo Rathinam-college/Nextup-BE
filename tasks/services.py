@@ -549,6 +549,27 @@ def render_plain_body_to_html(subject, body, recipient_name="Team Member", event
 def _async_send_mail(subject, body, from_email, recipient_email, html_body=None):
     """Worker function executed in background thread to avoid blocking concurrent web requests."""
     try:
+        # Cross-worker credential sync: load from email_config.json if worker memory lacks password
+        if not getattr(settings, 'EMAIL_HOST_PASSWORD', ''):
+            json_path = settings.BASE_DIR / 'email_config.json'
+            if json_path.exists():
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        cfg = json.load(f)
+                        if cfg.get('email_host_user'):
+                            settings.EMAIL_HOST_USER = cfg['email_host_user'].strip()
+                        if cfg.get('email_host_password'):
+                            settings.EMAIL_HOST_PASSWORD = cfg['email_host_password'].strip()
+                            settings.EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+                        if cfg.get('email_host'):
+                            settings.EMAIL_HOST = cfg['email_host'].strip()
+                        if cfg.get('email_port'):
+                            settings.EMAIL_PORT = int(cfg['email_port'])
+                        if 'email_use_tls' in cfg:
+                            settings.EMAIL_USE_TLS = bool(cfg['email_use_tls'])
+                except Exception:
+                    pass
+
         sender = getattr(settings, 'EMAIL_HOST_USER', '') or getattr(settings, 'DEFAULT_FROM_EMAIL', '') or from_email
         if not recipient_email or '@tasktracker.enterprise' in recipient_email:
             print(f"[Email] Skipping non-routable simulation recipient: {recipient_email}")

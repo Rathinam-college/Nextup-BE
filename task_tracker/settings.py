@@ -158,11 +158,32 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100 MB
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 20000
 
 # Email Configuration (SMTP with Console/Database Log Fallback)
+import json
+
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '').strip()
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '').strip()
 EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
 EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes')
+
+# Load persistent credentials from email_config.json if not set in environment
+_json_config_path = BASE_DIR / 'email_config.json'
+if _json_config_path.exists():
+    try:
+        with open(_json_config_path, 'r', encoding='utf-8') as _f:
+            _cfg = json.load(_f)
+            if not EMAIL_HOST_USER and _cfg.get('email_host_user'):
+                EMAIL_HOST_USER = _cfg['email_host_user'].strip()
+            if not EMAIL_HOST_PASSWORD and _cfg.get('email_host_password'):
+                EMAIL_HOST_PASSWORD = _cfg['email_host_password'].strip()
+            if _cfg.get('email_host'):
+                EMAIL_HOST = _cfg['email_host'].strip()
+            if _cfg.get('email_port'):
+                EMAIL_PORT = int(_cfg['email_port'])
+            if 'email_use_tls' in _cfg:
+                EMAIL_USE_TLS = bool(_cfg['email_use_tls'])
+    except Exception:
+        pass
 
 _configured_backend = os.getenv('EMAIL_BACKEND')
 if _configured_backend:
@@ -172,5 +193,5 @@ elif EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
 else:
     EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'notifications@tasktracker.enterprise')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'nextupnotification@gmail.com')
 
