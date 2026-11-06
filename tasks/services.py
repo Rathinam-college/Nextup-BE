@@ -9,7 +9,7 @@ import uuid
 import threading
 from urllib.parse import unquote
 import requests
-from django.core.mail import send_mail, EmailMultiAlternatives, get_connection
+from django.core.mail import send_mail, EmailMultiAlternatives, EmailMessage, get_connection
 from django.conf import settings
 from django.utils import timezone
 from django.db.models import Q
@@ -381,7 +381,7 @@ def build_branded_html_email(
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0">
                         <tr>
                           <td valign="middle">
-                            <img src="https://www.rguedu.in/nextup/nextup-logo.png" alt="NextUp" height="38" style="height: 38px; max-height: 38px; width: auto; max-width: 170px; display: block; border: 0;" />
+                            <img src="https://www.rguedu.in/nextup/nextup-logo.png" alt="NextUp Enterprise" height="38" style="height: 38px; max-height: 38px; width: auto; max-width: 170px; display: block; border: 0; color: #FFFFFF; font-size: 20px; font-weight: 800; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;" />
                           </td>
                         </tr>
                       </table>
@@ -390,7 +390,7 @@ def build_branded_html_email(
                   <!-- Right: Rathinam Logo -->
                   <td align="right" valign="middle">
                     <a href="https://rathinamcollege.edu.in/" target="_blank" style="text-decoration: none; display: inline-block;">
-                      <img src="https://www.rguedu.in/nextup/rathinam-logo.png" alt="Rathinam Group" height="32" style="height: 32px; max-height: 32px; width: auto; max-width: 140px; display: block; border: 0; opacity: 0.9;" />
+                      <img src="https://www.rguedu.in/nextup/rathinam-logo.png" alt="Rathinam Group" height="32" style="height: 32px; max-height: 32px; width: auto; max-width: 140px; display: block; border: 0; color: #CBD5E1; font-size: 13px; font-weight: 700; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;" />
                     </a>
                   </td>
                 </tr>
@@ -624,8 +624,9 @@ def sync_email_credentials():
 
 def send_branded_email(subject, plain_text, recipient_email, html_body=None, from_email=None):
     """
-    Dispatches a branded email via EmailMultiAlternatives with explicit text/html MIME part.
-    Guarantees responsive HTML email template with NextUp and Rathinam logos.
+    Dispatches a branded HTML email with NextUp and Rathinam logos.
+    Enforces pure HTML content type (text/html) so email clients like Microsoft Outlook,
+    Exchange Online, and Gmail always render the rich card design and never fall back to plain text.
     """
     try:
         sync_email_credentials()
@@ -655,16 +656,15 @@ def send_branded_email(subject, plain_text, recipient_email, html_body=None, fro
                 fail_silently=False,
             )
 
-        msg = EmailMultiAlternatives(
+        # Enforce HTML content type so Exchange Online / Outlook renders the full card design
+        msg = EmailMessage(
             subject=subject,
-            body=plain_text,
+            body=final_html,
             from_email=sender,
             to=[recipient_email],
             connection=connection,
         )
-        if final_html:
-            msg.attach_alternative(final_html, "text/html")
-
+        msg.content_subtype = "html"
         msg.extra_headers['X-Mailer'] = 'NextUp-Enterprise-Notification-Service'
         msg.extra_headers['Auto-Submitted'] = 'auto-generated'
         msg.send(fail_silently=False)
@@ -1943,6 +1943,44 @@ def push_message_to_assigned_staff(task, sender_user, message_text, send_email=T
         author=sender_user,
         content=f"💬 [DIRECT MESSAGE PUSHED TO {staff_name}]{urgent_tag}:\n\"{message_text}\""
     )
+
+    # Also notify GM when direct message is pushed to staff (unless sender is already the GM)
+    if not is_gm_own_task(task):
+        for gm in get_gm_recipients(exclude_user=sender_user):
+            if gm == staff:
+                continue
+            gm_subject = f"💬 [Copy] Direct Message on '{task.title}' to {staff_name}"
+            gm_html = build_branded_html_email(
+                title=gm_subject,
+                recipient_name=gm.get_full_name() or gm.username,
+                badge_text="💬 STAFF DIRECT MESSAGE COPY",
+                badge_variant="purple",
+                headline=f"Message to {staff_name}: '{task.title}'",
+                intro_lines=[
+                    f"A direct message was sent to <strong>{html.escape(staff_name)}</strong> by <strong>{html.escape(sender_name)}</strong> ({html.escape(sender_role)}) regarding task <strong>'{html.escape(task.title)}'</strong>."
+                ],
+                notes_callout=message_text,
+                details_dict=[
+                    ("Task ID", f"#{task.id}"),
+                    ("Task Title", task.title),
+                    ("Assigned Staff", staff_name),
+                    ("Department", f"{task.department.name} ({task.department.code})" if task.department else "General"),
+                    ("Sent By", f"{sender_name} ({sender_role})"),
+                    ("Sent At", formatted_time),
+                ],
+                action_url="https://www.rguedu.in/nextup/",
+                action_text="View in Management Portal",
+                closing_text="Recorded on NextUp deliverable communication thread."
+            )
+            try:
+                send_branded_email(
+                    subject=gm_subject,
+                    plain_text=email_body,
+                    recipient_email=gm.email,
+                    html_body=gm_html,
+                )
+            except Exception as e:
+                print(f"⚠️ Warning sending direct message copy to GM {gm}: {e}")
 
     # Dispatch mobile push notification to staff devices
     try:
