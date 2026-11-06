@@ -8,7 +8,7 @@ import uuid
 import threading
 from urllib.parse import unquote
 import requests
-from django.core.mail import send_mail
+from django.core.mail import send_mail, EmailMultiAlternatives, get_connection
 from django.conf import settings
 from django.utils import timezone
 from django.db.models import Q
@@ -546,45 +546,111 @@ def render_plain_body_to_html(subject, body, recipient_name="Team Member", event
     )
 
 
-def _async_send_mail(subject, body, from_email, recipient_email, html_body=None):
-    """Worker function executed in background thread to avoid blocking concurrent web requests."""
-    try:
-        # Cross-worker credential sync: load from email_config.json if worker memory lacks password
-        if not getattr(settings, 'EMAIL_HOST_PASSWORD', ''):
-            json_path = settings.BASE_DIR / 'email_config.json'
-            if json_path.exists():
-                try:
-                    with open(json_path, 'r', encoding='utf-8') as f:
-                        cfg = json.load(f)
-                        if cfg.get('email_host_user'):
-                            settings.EMAIL_HOST_USER = cfg['email_host_user'].strip()
-                        if cfg.get('email_host_password'):
-                            settings.EMAIL_HOST_PASSWORD = cfg['email_host_password'].strip()
-                            settings.EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-                        if cfg.get('email_host'):
-                            settings.EMAIL_HOST = cfg['email_host'].strip()
-                        if cfg.get('email_port'):
-                            settings.EMAIL_PORT = int(cfg['email_port'])
-                        if 'email_use_tls' in cfg:
-                            settings.EMAIL_USE_TLS = bool(cfg['email_use_tls'])
-                except Exception:
-                    pass
+def sync_email_credentials():
+    """
+    Synchronizes SMTP configuration from all persistent storage locations:
+    1. settings.BASE_DIR / 'email_config.json'
+    2. settings.MEDIA_ROOT / 'email_config.json'
+    3. settings.BASE_DIR / '.env'
+    Guarantees cross-worker consistency and protects against worker memory wipe.
+    """
+    config_paths = [
+        settings.BASE_DIR / 'email_config.json',
+        getattr(settings, 'MEDIA_ROOT', settings.BASE_DIR / 'media') / 'email_config.json',
+    ]
+    for p in config_paths:
+        try:
+            if p.exists():
+                with open(p, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                    user = cfg.get('email_host_user', '').strip()
+                    pwd = cfg.get('email_host_password', '').strip()
+                    if user and '@' in user:
+                        settings.EMAIL_HOST_USER = user
+                    if pwd:
+                        settings.EMAIL_HOST_PASSWORD = pwd
+                        settings.EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+                    if cfg.get('email_host'):
+                        settings.EMAIL_HOST = cfg['email_host'].strip()
+                    if cfg.get('email_port'):
+                        settings.EMAIL_PORT = int(cfg['email_port'])
+                    if 'email_use_tls' in cfg:
+                        settings.EMAIL_USE_TLS = bool(cfg['email_use_tls'])
+                    if cfg.get('default_from_email'):
+                        settings.DEFAULT_FROM_EMAIL = cfg['default_from_email'].strip()
+                    break
+        except Exception as e:
+            print(f"⚠️ Warning syncing email config from {p}: {e}")
 
-        sender = getattr(settings, 'EMAIL_HOST_USER', '') or getattr(settings, 'DEFAULT_FROM_EMAIL', '') or from_email
+    # Fallback default sender
+    if not getattr(settings, 'EMAIL_HOST_USER', '') or '@' not in getattr(settings, 'EMAIL_HOST_USER', ''):
+        settings.EMAIL_HOST_USER = 'nextupnotification@gmail.com'
+    if not getattr(settings, 'DEFAULT_FROM_EMAIL', '') or '@' not in getattr(settings, 'DEFAULT_FROM_EMAIL', ''):
+        settings.DEFAULT_FROM_EMAIL = 'nextupnotification@gmail.com'
+
+
+def send_branded_email(subject, plain_text, recipient_email, html_body=None, from_email=None):
+    """
+    Dispatches a branded email via EmailMultiAlternatives with explicit text/html MIME part.
+    Guarantees responsive HTML email template with NextUp and Rathinam logos.
+    """
+    try:
+        sync_email_credentials()
+
         if not recipient_email or '@tasktracker.enterprise' in recipient_email:
             print(f"[Email] Skipping non-routable simulation recipient: {recipient_email}")
-            return
-        send_mail(
+            return False
+
+        sender = getattr(settings, 'EMAIL_HOST_USER', '') or getattr(settings, 'DEFAULT_FROM_EMAIL', '') or from_email or 'nextupnotification@gmail.com'
+
+        final_html = html_body
+        if not final_html:
+            rec_name = recipient_email.split('@')[0].capitalize()
+            final_html = render_plain_body_to_html(subject=subject, body=plain_text, recipient_name=rec_name)
+
+        # Build connection dynamically if password exists to guarantee SMTP delivery
+        host_pwd = getattr(settings, 'EMAIL_HOST_PASSWORD', '')
+        connection = None
+        if host_pwd:
+            connection = get_connection(
+                backend='django.core.mail.backends.smtp.EmailBackend',
+                host=getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com'),
+                port=getattr(settings, 'EMAIL_PORT', 587),
+                username=getattr(settings, 'EMAIL_HOST_USER', 'nextupnotification@gmail.com'),
+                password=host_pwd,
+                use_tls=getattr(settings, 'EMAIL_USE_TLS', True),
+                fail_silently=False,
+            )
+
+        msg = EmailMultiAlternatives(
             subject=subject,
-            message=body,
+            body=plain_text,
             from_email=sender,
-            recipient_list=[recipient_email],
-            fail_silently=False,
-            html_message=html_body,
+            to=[recipient_email],
+            connection=connection,
         )
-        print(f"[Email] Successfully dispatched branded email to {recipient_email}")
+        if final_html:
+            msg.attach_alternative(final_html, "text/html")
+
+        msg.extra_headers['X-Mailer'] = 'NextUp-Enterprise-Notification-Service'
+        msg.extra_headers['Auto-Submitted'] = 'auto-generated'
+        msg.send(fail_silently=False)
+        print(f"[Email] Successfully dispatched branded HTML email to {recipient_email}")
+        return True
     except Exception as e:
-        print(f"⚠️ Email dispatch notification error for {recipient_email}: {e}")
+        print(f"⚠️ Email dispatch error to {recipient_email}: {e}")
+        return False
+
+
+def _async_send_mail(subject, body, from_email, recipient_email, html_body=None):
+    """Worker function executed in background thread to avoid blocking concurrent web requests."""
+    send_branded_email(
+        subject=subject,
+        plain_text=body,
+        recipient_email=recipient_email,
+        html_body=html_body,
+        from_email=from_email
+    )
 
 
 
@@ -707,14 +773,12 @@ def dispatch_email_and_notification(recipient, subject, body, event_type, task=N
         daemon=True
     ).start()
 
-    # Log dispatched email in database for real-time audit & UI demonstration
-    log_body = body
-
+    # Log dispatched email in database for real-time audit & UI demonstration with rich HTML
     email_log = DispatchedEmailLog.objects.create(
         recipient_email=recipient.email,
         recipient_name=recipient.get_full_name() or recipient.username,
         subject=subject,
-        body=log_body,
+        body=final_html_body or body,
         event_type=event_type,
     )
 
@@ -1398,20 +1462,20 @@ def send_test_email_verification(to_email, sender_user):
 
     email_error = None
     try:
-        send_mail(
+        success = send_branded_email(
             subject=subject,
-            message=body,
-            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'notifications@tasktracker.enterprise'),
-            recipient_list=[to_email],
-            fail_silently=False,
-            html_message=test_html,
+            plain_text=body,
+            recipient_email=to_email,
+            html_body=test_html,
         )
+        if not success:
+            email_error = "Email delivery failed. Please verify your Google App Password and SMTP connection."
     except Exception as e:
         email_error = str(e)
 
-    log_body = body
+    log_body = test_html
     if email_error:
-        log_body += f"\n\n[Delivery Status: Queued in Console / SMTP Notice: {email_error}]"
+        log_body += f"\n\n<!-- Delivery Error: {email_error} -->"
 
     email_log = DispatchedEmailLog.objects.create(
         recipient_email=to_email,
@@ -1503,27 +1567,23 @@ def push_message_to_assigned_staff(task, sender_user, message_text, send_email=T
     if send_email:
         email_error = None
         try:
-            send_mail(
+            success = send_branded_email(
                 subject=subject,
-                message=email_body,
-                from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'notifications@tasktracker.enterprise'),
-                recipient_list=[staff.email],
-                fail_silently=False,
-                html_message=direct_msg_html,
+                plain_text=email_body,
+                recipient_email=staff.email,
+                html_body=direct_msg_html,
             )
+            if not success:
+                email_error = "Direct message email delivery failed."
         except Exception as e:
             email_error = str(e)
             print(f"⚠️ Email dispatch error: {e}")
-
-        log_body = email_body
-        if email_error:
-            log_body += f"\n\n[Delivery Status: Logged in System / SMTP Notice: {email_error}]"
 
         email_log = DispatchedEmailLog.objects.create(
             recipient_email=staff.email,
             recipient_name=staff_name,
             subject=subject,
-            body=log_body,
+            body=direct_msg_html if not email_error else email_body,
             event_type='DIRECT_STAFF_MESSAGE',
         )
 

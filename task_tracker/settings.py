@@ -160,30 +160,38 @@ DATA_UPLOAD_MAX_NUMBER_FIELDS = 20000
 # Email Configuration (SMTP with Console/Database Log Fallback)
 import json
 
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '').strip()
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', 'nextupnotification@gmail.com').strip()
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '').strip()
 EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
 EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes')
 
 # Load persistent credentials from email_config.json if not set in environment
-_json_config_path = BASE_DIR / 'email_config.json'
-if _json_config_path.exists():
-    try:
-        with open(_json_config_path, 'r', encoding='utf-8') as _f:
-            _cfg = json.load(_f)
-            if not EMAIL_HOST_USER and _cfg.get('email_host_user'):
-                EMAIL_HOST_USER = _cfg['email_host_user'].strip()
-            if not EMAIL_HOST_PASSWORD and _cfg.get('email_host_password'):
-                EMAIL_HOST_PASSWORD = _cfg['email_host_password'].strip()
-            if _cfg.get('email_host'):
-                EMAIL_HOST = _cfg['email_host'].strip()
-            if _cfg.get('email_port'):
-                EMAIL_PORT = int(_cfg['email_port'])
-            if 'email_use_tls' in _cfg:
-                EMAIL_USE_TLS = bool(_cfg['email_use_tls'])
-    except Exception:
-        pass
+_config_search_paths = [
+    BASE_DIR / 'email_config.json',
+    BASE_DIR / 'media' / 'email_config.json',
+]
+for _json_config_path in _config_search_paths:
+    if _json_config_path.exists():
+        try:
+            with open(_json_config_path, 'r', encoding='utf-8') as _f:
+                _cfg = json.load(_f)
+                if _cfg.get('email_host_user') and '@' in _cfg['email_host_user']:
+                    EMAIL_HOST_USER = _cfg['email_host_user'].strip()
+                if _cfg.get('email_host_password'):
+                    EMAIL_HOST_PASSWORD = _cfg['email_host_password'].strip()
+                if _cfg.get('email_host'):
+                    EMAIL_HOST = _cfg['email_host'].strip()
+                if _cfg.get('email_port'):
+                    EMAIL_PORT = int(_cfg['email_port'])
+                if 'email_use_tls' in _cfg:
+                    EMAIL_USE_TLS = bool(_cfg['email_use_tls'])
+                break
+        except Exception:
+            pass
+
+if not EMAIL_HOST_USER or '@' not in EMAIL_HOST_USER:
+    EMAIL_HOST_USER = 'nextupnotification@gmail.com'
 
 _configured_backend = os.getenv('EMAIL_BACKEND')
 if _configured_backend:

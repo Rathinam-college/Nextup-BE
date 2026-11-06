@@ -38,7 +38,8 @@ from .services import (
     check_and_dispatch_all_timeline_reminders, send_test_email_verification,
     push_message_to_assigned_staff, save_task_attachment_image,
     parse_attachments_list, serialize_attachments_list,
-    send_expo_push_notification, record_user_login, record_user_logout
+    send_expo_push_notification, record_user_login, record_user_logout,
+    sync_email_credentials
 )
 
 
@@ -2036,30 +2037,12 @@ def clear_database(request):
 def get_email_status(request):
     """
     Returns email configuration details, active backend, host, and delivery mode.
-    Always verifies against email_config.json to ensure multi-worker Gunicorn consistency.
+    Always verifies against persistent storage to ensure multi-worker Gunicorn consistency.
     """
-    json_path = settings.BASE_DIR / 'email_config.json'
-    if json_path.exists():
-        try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                cfg = json.load(f)
-                if cfg.get('email_host_user'):
-                    settings.EMAIL_HOST_USER = cfg['email_host_user'].strip()
-                if cfg.get('email_host_password'):
-                    settings.EMAIL_HOST_PASSWORD = cfg['email_host_password'].strip()
-                if cfg.get('email_host'):
-                    settings.EMAIL_HOST = cfg['email_host'].strip()
-                if cfg.get('email_port'):
-                    settings.EMAIL_PORT = int(cfg['email_port'])
-                if 'email_use_tls' in cfg:
-                    settings.EMAIL_USE_TLS = bool(cfg['email_use_tls'])
-                if settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD:
-                    settings.EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-        except Exception:
-            pass
+    sync_email_credentials()
 
     backend = getattr(settings, 'EMAIL_BACKEND', '')
-    host_user = getattr(settings, 'EMAIL_HOST_USER', '')
+    host_user = getattr(settings, 'EMAIL_HOST_USER', '') or 'nextupnotification@gmail.com'
     has_pwd = bool(getattr(settings, 'EMAIL_HOST_PASSWORD', ''))
     is_smtp = ('smtp.EmailBackend' in backend) or (bool(host_user) and has_pwd)
 
@@ -2069,8 +2052,8 @@ def get_email_status(request):
         'host': getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com'),
         'port': getattr(settings, 'EMAIL_PORT', 587),
         'use_tls': getattr(settings, 'EMAIL_USE_TLS', True),
-        'from_email': getattr(settings, 'DEFAULT_FROM_EMAIL', host_user or 'nextupnotification@gmail.com'),
-        'email_host_user': host_user or 'nextupnotification@gmail.com',
+        'from_email': getattr(settings, 'DEFAULT_FROM_EMAIL', host_user),
+        'email_host_user': host_user,
         'has_smtp_user': bool(host_user),
         'has_smtp_password': has_pwd,
         'masked_password': '••••••••••••••••' if has_pwd else '',
@@ -2084,8 +2067,9 @@ def get_email_status(request):
 def update_email_settings(request):
     """
     Saves and activates SMTP email configuration (Host, Port, User, App Password, TLS).
-    Persists to email_config.json & .env file and dynamically updates runtime Django settings immediately.
-    Guarantees persistence across all Gunicorn workers and rejects non-email username inputs (e.g. 'Hostel').
+    Persists to email_config.json in BASE_DIR & MEDIA_ROOT (persistent volume) & .env file.
+    Dynamically updates runtime Django settings immediately across all Gunicorn workers.
+    Protects against browser autofill username injection (e.g. 'Hostel').
     """
     user = request.user
     email_user = request.data.get('email_host_user', '').strip()
@@ -2101,33 +2085,20 @@ def update_email_settings(request):
     if isinstance(use_tls, str):
         use_tls = use_tls.lower() in ('true', '1', 'yes')
 
+    # Guard against invalid or autofilled non-email usernames like 'Hostel'
+    if not email_user or ('@' not in email_user or '.' not in email_user) or email_user.lower() == 'hostel':
+        email_user = getattr(settings, 'EMAIL_HOST_USER', '') or 'nextupnotification@gmail.com'
+        if not email_user or '@' not in email_user:
+            email_user = 'nextupnotification@gmail.com'
+
     default_from = request.data.get('default_from_email', '').strip() or email_user or 'nextupnotification@gmail.com'
     test_recipient = request.data.get('test_recipient_email', '').strip()
 
-    # Reject non-email usernames like 'Hostel' that browser autofill may inject
-    if email_user and ('@' not in email_user or '.' not in email_user):
-        return Response({
-            'status': 'error',
-            'message': f"'{email_user}' is not a valid email address. Please enter a valid Gmail address (e.g. nextupnotification@gmail.com). Do not enter a username.",
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    # If password is omitted, preserve existing password from settings or email_config.json
-    json_path = settings.BASE_DIR / 'email_config.json'
+    # Synchronize credentials first to inspect existing password if omitted
+    sync_email_credentials()
     existing_pwd = getattr(settings, 'EMAIL_HOST_PASSWORD', '')
-    if not existing_pwd and json_path.exists():
-        try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                saved = json.load(f)
-                existing_pwd = saved.get('email_host_password', '')
-        except Exception:
-            pass
-
     if not email_pwd and existing_pwd:
         email_pwd = existing_pwd
-
-    # If email_user was omitted or cleared, preserve existing user if present
-    if not email_user:
-        email_user = getattr(settings, 'EMAIL_HOST_USER', '') or 'nextupnotification@gmail.com'
 
     # 1. Update runtime Django mail settings and os.environ immediately
     settings.EMAIL_HOST = email_host
@@ -2150,7 +2121,7 @@ def update_email_settings(request):
     os.environ['EMAIL_BACKEND'] = settings.EMAIL_BACKEND
     os.environ['DEFAULT_FROM_EMAIL'] = default_from
 
-    # 2. Persist to email_config.json (cross-worker atomic file)
+    # 2. Persist to email_config.json in BOTH BASE_DIR and MEDIA_ROOT (docker volume)
     cfg_data = {
         'email_host_user': email_user,
         'email_host_password': email_pwd,
@@ -2161,11 +2132,23 @@ def update_email_settings(request):
         'updated_at': timezone.now().isoformat(),
         'updated_by': user.username,
     }
-    try:
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(cfg_data, f, indent=2)
-    except Exception as e:
-        print(f"⚠️ Could not write to email_config.json: {e}")
+    save_locations = [
+        settings.BASE_DIR / 'email_config.json',
+    ]
+    media_root = getattr(settings, 'MEDIA_ROOT', settings.BASE_DIR / 'media')
+    if media_root:
+        try:
+            os.makedirs(media_root, exist_ok=True)
+            save_locations.append(media_root / 'email_config.json')
+        except Exception:
+            pass
+
+    for loc in save_locations:
+        try:
+            with open(loc, 'w', encoding='utf-8') as f:
+                json.dump(cfg_data, f, indent=2)
+        except Exception as e:
+            print(f"⚠️ Could not write to {loc}: {e}")
 
     # 3. Persist to .env in backend directory
     env_path = settings.BASE_DIR / '.env'
