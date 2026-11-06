@@ -1,3 +1,4 @@
+from pathlib import Path
 import base64
 import html
 import json
@@ -550,13 +551,16 @@ def sync_email_credentials():
     """
     Synchronizes SMTP configuration from all persistent storage locations:
     1. settings.BASE_DIR / 'email_config.json'
-    2. settings.MEDIA_ROOT / 'email_config.json'
+    2. settings.MEDIA_ROOT / 'email_config.json' (persistent volume)
     3. settings.BASE_DIR / '.env'
+    4. ActivityLog persistent record in database
     Guarantees cross-worker consistency and protects against worker memory wipe.
     """
+    base_dir = Path(settings.BASE_DIR)
+    media_dir = Path(getattr(settings, 'MEDIA_ROOT', base_dir / 'media'))
     config_paths = [
-        settings.BASE_DIR / 'email_config.json',
-        getattr(settings, 'MEDIA_ROOT', settings.BASE_DIR / 'media') / 'email_config.json',
+        base_dir / 'email_config.json',
+        media_dir / 'email_config.json',
     ]
     for p in config_paths:
         try:
@@ -570,6 +574,8 @@ def sync_email_credentials():
                     if pwd:
                         settings.EMAIL_HOST_PASSWORD = pwd
                         settings.EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+                        os.environ['EMAIL_HOST_PASSWORD'] = pwd
+                        os.environ['EMAIL_BACKEND'] = settings.EMAIL_BACKEND
                     if cfg.get('email_host'):
                         settings.EMAIL_HOST = cfg['email_host'].strip()
                     if cfg.get('email_port'):
@@ -578,9 +584,36 @@ def sync_email_credentials():
                         settings.EMAIL_USE_TLS = bool(cfg['email_use_tls'])
                     if cfg.get('default_from_email'):
                         settings.DEFAULT_FROM_EMAIL = cfg['default_from_email'].strip()
-                    break
+                    if pwd:
+                        break
         except Exception as e:
             print(f"⚠️ Warning syncing email config from {p}: {e}")
+
+    # Fallback to database ActivityLog if password not yet in settings
+    if not getattr(settings, 'EMAIL_HOST_PASSWORD', ''):
+        try:
+            latest_cfg_log = ActivityLog.objects.filter(action='PERSISTENT_SMTP_CONFIG').order_by('-timestamp').first()
+            if latest_cfg_log and latest_cfg_log.details:
+                cfg = json.loads(latest_cfg_log.details)
+                user = cfg.get('email_host_user', '').strip()
+                pwd = cfg.get('email_host_password', '').strip()
+                if user and '@' in user:
+                    settings.EMAIL_HOST_USER = user
+                if pwd:
+                    settings.EMAIL_HOST_PASSWORD = pwd
+                    settings.EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+                    os.environ['EMAIL_HOST_PASSWORD'] = pwd
+                    os.environ['EMAIL_BACKEND'] = settings.EMAIL_BACKEND
+                if cfg.get('email_host'):
+                    settings.EMAIL_HOST = cfg['email_host'].strip()
+                if cfg.get('email_port'):
+                    settings.EMAIL_PORT = int(cfg['email_port'])
+                if 'email_use_tls' in cfg:
+                    settings.EMAIL_USE_TLS = bool(cfg['email_use_tls'])
+                if cfg.get('default_from_email'):
+                    settings.DEFAULT_FROM_EMAIL = cfg['default_from_email'].strip()
+        except Exception as e:
+            print(f"⚠️ Warning syncing email config from DB: {e}")
 
     # Fallback default sender
     if not getattr(settings, 'EMAIL_HOST_USER', '') or '@' not in getattr(settings, 'EMAIL_HOST_USER', ''):
@@ -926,6 +959,16 @@ def get_task_target_recipients(task):
     return recipients
 
 
+def get_gm_recipients(exclude_user=None):
+    """
+    Returns active General Manager and Super Admin users to ensure executive management oversight.
+    """
+    gms = User.objects.filter(role__in=[User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN], is_active=True)
+    if exclude_user:
+        gms = gms.exclude(id=exclude_user.id)
+    return list(gms)
+
+
 def notify_task_assigned(task, assigned_by):
     # GM Own Task: Never send notification or email to anyone
     if is_gm_own_task(task):
@@ -1028,6 +1071,51 @@ def notify_task_assigned(task, assigned_by):
             html_body=html_body,
         )
 
+    # Also notify GM when new task is created / delegated
+    if not is_gm_own_task(task):
+        gms = get_gm_recipients(exclude_user=assigned_by)
+        for gm in gms:
+            if gm in recipients:
+                continue
+            gm_subject = f"📋 [{dept_str}] New Deliverable Created: '{task.title}'"
+            gm_html = build_branded_html_email(
+                title=gm_subject,
+                recipient_name=gm.get_full_name() or gm.username,
+                badge_text="📋 NEW TASK DELEGATED",
+                badge_variant="primary",
+                headline=f"New Task Delegated: {task.title}",
+                intro_lines=[
+                    f"A new deliverable <strong>'{html.escape(task.title)}'</strong> was created by <strong>{html.escape(assigned_by_name)}</strong> in department <strong>{html.escape(dept_str)}</strong>.",
+                    f"Assigned staff: <strong>{html.escape(task.assigned_to.get_full_name() if task.assigned_to else 'Unassigned')}</strong>."
+                ],
+                details_dict=[
+                    ("Department", dept_str),
+                    ("Assigned Staff", task.assigned_to.get_full_name() if task.assigned_to else "Unassigned"),
+                    ("Priority", priority_str),
+                    ("Target Timeline", timeline_str),
+                    ("Delegated By", assigned_by_name),
+                ],
+                description_text=clean_desc,
+                action_url="https://www.rguedu.in/nextup/",
+                action_text="View in Management Portal",
+                closing_text="This deliverable has been logged in NextUp enterprise task tracker."
+            )
+            dispatch_email_and_notification(
+                recipient=gm,
+                subject=gm_subject,
+                body=(
+                    f"Hello {gm.get_full_name() or gm.username},\n\n"
+                    f"New task '{task.title}' in {dept_str} was delegated by {assigned_by_name} to {task.assigned_to.get_full_name() if task.assigned_to else 'Unassigned'}.\n\n"
+                    f"Priority: {priority_str} • Due Date: {timeline_str}\n"
+                    f"Description:\n{clean_desc}\n\n"
+                    f"View in portal: https://www.rguedu.in/nextup/"
+                ),
+                event_type='TASK_ASSIGNED',
+                task=task,
+                title=f"New Deliverable Delegated: {task.title}",
+                html_body=gm_html,
+            )
+
 
 def notify_task_timeline_updated(task, updated_by, old_due_date):
     if is_gm_own_task(task):
@@ -1037,7 +1125,7 @@ def notify_task_timeline_updated(task, updated_by, old_due_date):
     recipients = get_task_target_recipients(task)
 
     timeline_str = format_timeline_text(task.due_date)
-    subject = f"⏰ [{task.department.code}] Timeline Updated: '{task.title}' (New Deadline: {task.due_date or 'None'})"
+    subject = f"⏰ [{task.department.code if task.department else 'NextUp'}] Timeline Updated: '{task.title}' (New Deadline: {task.due_date or 'None'})"
 
     for rec in recipients:
         body = (
@@ -1048,7 +1136,7 @@ def notify_task_timeline_updated(task, updated_by, old_due_date):
             f"• Previous Deadline: {old_due_date or 'None'}\n"
             f"• New Target Timeline: {timeline_str}\n"
             f"• Priority: {task.get_priority_display()}\n"
-            f"• Department: {task.department.name}\n"
+            f"• Department: {task.department.name if task.department else 'General'}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Please adjust your schedule and task milestones accordingly on NextUp."
         )
@@ -1079,6 +1167,119 @@ def notify_task_timeline_updated(task, updated_by, old_due_date):
             event_type='TIMELINE_UPDATED',
             task=task,
             title=f"Timeline Updated: {task.title} -> {task.due_date or 'Flexible'}",
+            html_body=html_body,
+        )
+
+    # Also notify GM when timeline is modified
+    gms = get_gm_recipients(exclude_user=updated_by)
+    for gm in gms:
+        if gm in recipients:
+            continue
+        gm_body = (
+            f"Hello {gm.get_full_name() or gm.username},\n\n"
+            f"The target timeline for task '{task.title}' was updated by {updated_by.get_full_name() or updated_by.username}.\n"
+            f"• Previous Deadline: {old_due_date or 'None'}\n"
+            f"• New Target Deadline: {timeline_str}\n"
+            f"• Assigned Staff: {task.assigned_to.get_full_name() if task.assigned_to else 'Unassigned'}\n"
+            f"• Priority: {task.get_priority_display()}\n"
+        )
+        gm_html = build_branded_html_email(
+            title=subject,
+            recipient_name=gm.get_full_name() or gm.username,
+            badge_text="⏰ TIMELINE RESCHEDULED",
+            badge_variant="warning",
+            headline=f"Timeline Rescheduled: {task.title}",
+            intro_lines=[
+                f"The target timeline for task <strong>'{html.escape(task.title)}'</strong> was rescheduled by <strong>{html.escape(updated_by.get_full_name() or updated_by.username)}</strong>."
+            ],
+            details_dict=[
+                ("Task", task.title),
+                ("Assigned Staff", task.assigned_to.get_full_name() if task.assigned_to else "Unassigned"),
+                ("Previous Deadline", str(old_due_date or 'Flexible / None')),
+                ("New Target Timeline", timeline_str),
+                ("Priority", task.get_priority_display()),
+                ("Department", task.department.name if task.department else "General"),
+            ],
+            action_url="https://www.rguedu.in/nextup/",
+            action_text="View in Management Portal",
+            closing_text="Please review the updated timeline on NextUp."
+        )
+        dispatch_email_and_notification(
+            recipient=gm,
+            subject=subject,
+            body=gm_body,
+            event_type='TIMELINE_UPDATED',
+            task=task,
+            title=f"Timeline Updated: {task.title} -> {task.due_date or 'Flexible'}",
+            html_body=gm_html,
+        )
+
+
+def notify_task_details_updated(task, updated_by, changes_summary="Task specifications updated"):
+    """
+    Dispatches branded email notification to BOTH User (Assigned Staff) and GM
+    whenever task title, description, priority, or specifications are modified.
+    """
+    if is_gm_own_task(task):
+        return
+
+    recipients = set(get_task_target_recipients(task))
+    for gm in get_gm_recipients():
+        recipients.add(gm)
+
+    if updated_by in recipients:
+        recipients.remove(updated_by)
+
+    editor_name = updated_by.get_full_name() or updated_by.username
+    subject = f"📝 [{task.department.code if task.department else 'NextUp'}] Task Details Updated: '{task.title}'"
+    timeline_str = format_timeline_text(task.due_date)
+
+    for rec in recipients:
+        body = (
+            f"Hello {rec.get_full_name() or rec.username},\n\n"
+            f"Task '{task.title}' was updated by {editor_name}.\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📋 LATEST TASK SPECIFICATIONS:\n"
+            f"• Title: {task.title}\n"
+            f"• Department: {task.department.name if task.department else 'General'}\n"
+            f"• Priority: {task.get_priority_display()}\n"
+            f"• Status: {task.get_status_display()}\n"
+            f"• Target Deadline: {timeline_str}\n"
+            f"• Assigned Staff: {task.assigned_to.get_full_name() if task.assigned_to else 'Unassigned'}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Update Summary: {changes_summary}\n\n"
+            f"Please review the updated deliverable on the NextUp portal."
+        )
+        html_body = build_branded_html_email(
+            title=subject,
+            recipient_name=rec.get_full_name() or rec.username,
+            badge_text="📝 TASK DETAILS UPDATED",
+            badge_variant="primary",
+            headline=f"Task Updated: {task.title}",
+            intro_lines=[
+                f"Task <strong>'{html.escape(task.title)}'</strong> was edited by <strong>{html.escape(editor_name)}</strong>."
+            ],
+            details_dict=[
+                ("Task", task.title),
+                ("Department", task.department.name if task.department else "General"),
+                ("Priority", task.get_priority_display()),
+                ("Status", task.get_status_display()),
+                ("Target Due Date", timeline_str),
+                ("Assigned Staff", task.assigned_to.get_full_name() if task.assigned_to else "Unassigned"),
+                ("Edited By", editor_name),
+            ],
+            notes_callout=changes_summary,
+            action_url="https://www.rguedu.in/nextup/",
+            action_text="View Updated Task in NextUp",
+            closing_text="Please review the updated deliverable requirements on the NextUp portal."
+        )
+        dispatch_email_and_notification(
+            recipient=rec,
+            subject=subject,
+            body=body,
+            event_type='TASK_UPDATED',
+            task=task,
+            title=f"Task Updated: {task.title}",
             html_body=html_body,
         )
 
@@ -1198,7 +1399,7 @@ def check_and_dispatch_all_timeline_reminders():
 
 
 def notify_submitted_for_gm_verification(task, submitted_by):
-    # Alert all General Managers and Super Admins
+    # 1. Alert all General Managers and Super Admins
     gms = User.objects.filter(role__in=[User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN], is_active=True)
     for gm in gms:
         subject = f"✉️ Task Awaiting Verification: {task.title}"
@@ -1240,11 +1441,53 @@ def notify_submitted_for_gm_verification(task, submitted_by):
             html_body=html_body,
         )
 
+    # 2. Also send confirmation email to the User / Assigned Staff
+    staff_recipients = get_task_target_recipients(task)
+    for staff in staff_recipients:
+        staff_subject = f"🔍 [Under Review] Deliverable Submitted: '{task.title}'"
+        staff_body = (
+            f"Hello {staff.get_full_name() or staff.username},\n\n"
+            f"Your deliverable for task '{task.title}' was submitted by {submitted_by.get_full_name() or submitted_by.username} "
+            f"and is currently under review awaiting GM verification and closure sign-off.\n\n"
+            f"Department: {task.department.name if task.department else 'General'}\n"
+            f"Priority: {task.get_priority_display()}\n"
+            f"Target Timeline: {format_timeline_text(task.due_date)}\n\n"
+            f"You will be notified as soon as the General Manager verifies your submission."
+        )
+        staff_html = build_branded_html_email(
+            title=staff_subject,
+            recipient_name=staff.get_full_name() or staff.username,
+            badge_text="🔍 SUBMITTED FOR GM VERIFICATION",
+            badge_variant="purple",
+            headline=f"Deliverable In Review: {task.title}",
+            intro_lines=[
+                f"Your deliverable for task <strong>'{html.escape(task.title)}'</strong> was submitted by <strong>{html.escape(submitted_by.get_full_name() or submitted_by.username)}</strong> and is currently under review by the General Manager."
+            ],
+            details_dict=[
+                ("Task", task.title),
+                ("Department", task.department.name if task.department else "General"),
+                ("Priority", task.get_priority_display()),
+                ("Status", "PENDING GM APPROVAL"),
+                ("Target Due Date", format_timeline_text(task.due_date)),
+            ],
+            action_url="https://www.rguedu.in/nextup/",
+            action_text="View Deliverable Status",
+            closing_text="You will be notified as soon as the General Manager verifies your submission."
+        )
+        dispatch_email_and_notification(
+            recipient=staff,
+            subject=staff_subject,
+            body=staff_body,
+            event_type='TASK_SUBMITTED_FOR_REVIEW',
+            task=task,
+            title=f"In Review: {task.title}",
+            html_body=staff_html,
+        )
+
 
 def notify_gm_approved(task, gm_user, notes=""):
-    # Strictly notify only assigned person and explicitly co-assigned team members
+    # 1. Strictly notify assigned person and explicitly co-assigned team members
     recipients = get_task_target_recipients(task)
-
     notes_str = f"\nGM Approval Remarks: {notes}\n" if notes else ""
 
     for rec in recipients:
@@ -1287,9 +1530,54 @@ def notify_gm_approved(task, gm_user, notes=""):
             html_body=html_body,
         )
 
+    # 2. Also send milestone closure confirmation to GM & Management team
+    gms = get_gm_recipients()
+    for gm in gms:
+        if gm in recipients:
+            continue
+        gm_subject = f"✅ [Milestone Closed] Task Verified: '{task.title}'"
+        gm_body = (
+            f"Hello {gm.get_full_name() or gm.username},\n\n"
+            f"Task '{task.title}' has been officially verified and closed by {gm_user.get_full_name() or gm_user.username}.{notes_str}\n"
+            f"Assigned Staff: {task.assigned_to.get_full_name() if task.assigned_to else 'Unassigned'}\n"
+            f"Department: {task.department.name if task.department else 'General'}\n"
+            f"Closed Date: {task.closed_at.strftime('%Y-%m-%d %H:%M') if task.closed_at else 'Just now'}\n"
+        )
+        gm_html = build_branded_html_email(
+            title=gm_subject,
+            recipient_name=gm.get_full_name() or gm.username,
+            badge_text="✅ MILESTONE VERIFIED & CLOSED",
+            badge_variant="success",
+            headline=f"Task Verified & Closed: {task.title}",
+            intro_lines=[
+                f"Task <strong>'{html.escape(task.title)}'</strong> completed by <strong>{html.escape(task.assigned_to.get_full_name() if task.assigned_to else 'Staff')}</strong> was officially verified and closed by <strong>{html.escape(gm_user.get_full_name() or gm_user.username)}</strong>."
+            ],
+            details_dict=[
+                ("Task", task.title),
+                ("Assigned Staff", task.assigned_to.get_full_name() if task.assigned_to else "Unassigned"),
+                ("Department", task.department.name if task.department else "General"),
+                ("Status", "CLOSED & VERIFIED"),
+                ("Closed Date", task.closed_at.strftime('%Y-%m-%d %H:%M') if task.closed_at else "Just now"),
+                ("Verified By", gm_user.get_full_name() or gm_user.username),
+            ],
+            notes_callout=notes if notes else None,
+            action_url="https://www.rguedu.in/nextup/",
+            action_text="View Closed Task",
+            closing_text="Official verification recorded in NextUp enterprise audit trail."
+        )
+        dispatch_email_and_notification(
+            recipient=gm,
+            subject=gm_subject,
+            body=gm_body,
+            event_type='GM_APPROVED',
+            task=task,
+            title=f"Task Verified & Closed: {task.title}",
+            html_body=gm_html,
+        )
+
 
 def notify_gm_changes_requested(task, gm_user, feedback_notes):
-    # Strictly notify only assigned person and explicitly co-assigned team members
+    # 1. Strictly notify assigned person and explicitly co-assigned team members
     recipients = get_task_target_recipients(task)
 
     for rec in recipients:
@@ -1328,6 +1616,48 @@ def notify_gm_changes_requested(task, gm_user, feedback_notes):
             task=task,
             title=f"Changes Requested: {task.title}",
             html_body=html_body,
+        )
+
+    # 2. Also send revision copy to GM
+    gms = get_gm_recipients()
+    for gm in gms:
+        if gm in recipients:
+            continue
+        gm_subject = f"⚠️ [Revision Sent] Changes Requested on '{task.title}'"
+        gm_body = (
+            f"Hello {gm.get_full_name() or gm.username},\n\n"
+            f"Revisions were requested on task '{task.title}' for staff {task.assigned_to.get_full_name() if task.assigned_to else 'Unassigned'}.\n\n"
+            f"Feedback: {feedback_notes}\n"
+        )
+        gm_html = build_branded_html_email(
+            title=gm_subject,
+            recipient_name=gm.get_full_name() or gm.username,
+            badge_text="⚠️ REVISIONS REQUESTED",
+            badge_variant="warning",
+            headline=f"Changes Requested: {task.title}",
+            intro_lines=[
+                f"Revisions were requested on task <strong>'{html.escape(task.title)}'</strong> from staff <strong>{html.escape(task.assigned_to.get_full_name() if task.assigned_to else 'Staff')}</strong> by <strong>{html.escape(gm_user.get_full_name() or gm_user.username)}</strong>."
+            ],
+            details_dict=[
+                ("Task", task.title),
+                ("Assigned Staff", task.assigned_to.get_full_name() if task.assigned_to else "Unassigned"),
+                ("Department", task.department.name if task.department else "General"),
+                ("Status", "CHANGES_REQUESTED"),
+                ("Reviewed By", gm_user.get_full_name() or gm_user.username),
+            ],
+            notes_callout=feedback_notes,
+            action_url="https://www.rguedu.in/nextup/",
+            action_text="View in GM Hub",
+            closing_text="The assigned staff member has been notified via branded email with your feedback notes."
+        )
+        dispatch_email_and_notification(
+            recipient=gm,
+            subject=gm_subject,
+            body=gm_body,
+            event_type='GM_CHANGES_REQUESTED',
+            task=task,
+            title=f"Changes Requested: {task.title}",
+            html_body=gm_html,
         )
 
 
@@ -1377,6 +1707,16 @@ def notify_comment_added(comment):
         recipients.add(task.assigned_to)
     if task.created_by and task.created_by != comment.author:
         recipients.add(task.created_by)
+
+    # 1. Add all co-assigned staff members
+    for target in get_task_target_recipients(task):
+        if target != comment.author:
+            recipients.add(target)
+
+    # 2. Add all General Managers so management is always in the loop on task discussions
+    if not is_gm_own_task(task):
+        for gm in get_gm_recipients(exclude_user=comment.author):
+            recipients.add(gm)
 
     author_name = comment.author.get_full_name() or comment.author.username
     subject = f"✉️ New Note on {task.title}"
@@ -1665,6 +2005,9 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
     for r in recipients:
         try:
             active_tasks = Task.objects.filter(assigned_to=r).exclude(status=Task.STATUS_CLOSED)
+            # CRITICAL USER RULE: Only send email if staff has active tasks! If 0 active tasks, SKIP completely!
+            if not active_tasks.exists():
+                continue
             urgent_or_due = active_tasks.filter(
                 Q(priority=Task.PRIORITY_URGENT) | Q(due_date__lte=today)
             ).order_by('due_date')

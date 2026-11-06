@@ -1,3 +1,4 @@
+from pathlib import Path
 import csv
 import io
 import os
@@ -34,7 +35,7 @@ from .services import (
     notify_task_assigned, notify_submitted_for_gm_verification,
     notify_gm_approved, notify_gm_changes_requested,
     notify_staff_created, notify_comment_added,
-    notify_task_timeline_updated, notify_timeline_reminder,
+    notify_task_timeline_updated, notify_task_details_updated, notify_timeline_reminder,
     check_and_dispatch_all_timeline_reminders, send_test_email_verification,
     push_message_to_assigned_staff, save_task_attachment_image,
     parse_attachments_list, serialize_attachments_list,
@@ -416,6 +417,8 @@ class TaskViewSet(viewsets.ModelViewSet):
             else:
                 log_activity(user, "UPDATED_TASK_STATUS", f"Updated status of '{updated_task.title}' to {updated_task.get_status_display()}", task=updated_task)
         else:
+            if not ('due_date' in serializer.validated_data and new_due_date != old_due_date):
+                notify_task_details_updated(updated_task, user)
             log_activity(user, "UPDATED_TASK", f"Updated details for '{updated_task.title}'", task=updated_task)
 
     def perform_destroy(self, instance):
@@ -2122,26 +2125,16 @@ def update_email_settings(request):
     os.environ['DEFAULT_FROM_EMAIL'] = default_from
 
     # 2. Persist to email_config.json in BOTH BASE_DIR and MEDIA_ROOT (docker volume)
-    cfg_data = {
-        'email_host_user': email_user,
-        'email_host_password': email_pwd,
-        'email_host': email_host,
-        'email_port': email_port,
-        'email_use_tls': use_tls,
-        'default_from_email': default_from,
-        'updated_at': timezone.now().isoformat(),
-        'updated_by': user.username,
-    }
+    base_dir = Path(settings.BASE_DIR)
+    media_dir = Path(getattr(settings, 'MEDIA_ROOT', base_dir / 'media'))
     save_locations = [
-        settings.BASE_DIR / 'email_config.json',
+        base_dir / 'email_config.json',
     ]
-    media_root = getattr(settings, 'MEDIA_ROOT', settings.BASE_DIR / 'media')
-    if media_root:
-        try:
-            os.makedirs(media_root, exist_ok=True)
-            save_locations.append(media_root / 'email_config.json')
-        except Exception:
-            pass
+    try:
+        os.makedirs(media_dir, exist_ok=True)
+        save_locations.append(media_dir / 'email_config.json')
+    except Exception:
+        pass
 
     for loc in save_locations:
         try:
@@ -2168,6 +2161,16 @@ def update_email_settings(request):
             f.write(env_content)
     except Exception as e:
         print(f"⚠️ Could not write to .env file: {e}")
+
+    # 4. Indestructible persistence in PostgreSQL database
+    try:
+        ActivityLog.objects.create(
+            user=user,
+            action="PERSISTENT_SMTP_CONFIG",
+            details=json.dumps(cfg_data)
+        )
+    except Exception as e:
+        print(f"⚠️ Could not write config to ActivityLog: {e}")
 
     log_activity(
         user,
