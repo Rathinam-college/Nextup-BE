@@ -10,6 +10,7 @@ import threading
 from urllib.parse import unquote
 import requests
 from django.core.mail import send_mail, EmailMultiAlternatives, EmailMessage, get_connection
+from email.mime.image import MIMEImage
 from django.conf import settings
 from django.utils import timezone
 from django.db.models import Q
@@ -656,6 +657,35 @@ def send_branded_email(subject, plain_text, recipient_email, html_body=None, fro
                 fail_silently=False,
             )
 
+        # Embed logos as inline CID attachments so Outlook & webmail never block them
+        base_dir = Path(settings.BASE_DIR)
+        media_dir = Path(getattr(settings, 'MEDIA_ROOT', base_dir / 'media'))
+        nextup_logo_path = media_dir / 'nextup-logo.png'
+        rathinam_logo_path = media_dir / 'rathinam-logo.png'
+
+        cid_attachments = []
+        if nextup_logo_path.exists():
+            try:
+                with open(nextup_logo_path, 'rb') as f:
+                    img = MIMEImage(f.read())
+                    img.add_header('Content-ID', '<nextup_logo>')
+                    img.add_header('Content-Disposition', 'inline', filename='nextup-logo.png')
+                    cid_attachments.append(img)
+                    final_html = final_html.replace('https://www.rguedu.in/nextup/nextup-logo.png', 'cid:nextup_logo')
+            except Exception as e:
+                print(f"[Email] Notice embedding nextup-logo CID: {e}")
+
+        if rathinam_logo_path.exists():
+            try:
+                with open(rathinam_logo_path, 'rb') as f:
+                    img = MIMEImage(f.read())
+                    img.add_header('Content-ID', '<rathinam_logo>')
+                    img.add_header('Content-Disposition', 'inline', filename='rathinam-logo.png')
+                    cid_attachments.append(img)
+                    final_html = final_html.replace('https://www.rguedu.in/nextup/rathinam-logo.png', 'cid:rathinam_logo')
+            except Exception as e:
+                print(f"[Email] Notice embedding rathinam-logo CID: {e}")
+
         # Enforce HTML content type so Exchange Online / Outlook renders the full card design
         msg = EmailMessage(
             subject=subject,
@@ -665,6 +695,9 @@ def send_branded_email(subject, plain_text, recipient_email, html_body=None, fro
             connection=connection,
         )
         msg.content_subtype = "html"
+        for inline_img in cid_attachments:
+            msg.attach(inline_img)
+
         msg.extra_headers['X-Mailer'] = 'NextUp-Enterprise-Notification-Service'
         msg.extra_headers['Auto-Submitted'] = 'auto-generated'
         msg.send(fail_silently=False)
