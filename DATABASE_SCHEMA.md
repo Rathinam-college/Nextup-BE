@@ -1,8 +1,10 @@
-# PostgreSQL 18 Database Schema & Entity-Relationship (ER) Diagram
+# 🗄️ PostgreSQL 18 Database Schema & Entity-Relationship Documentation
 
-**System:** Enterprise Multi-Department Task Tracker  
+**System:** NextUp Enterprise Multi-Department Task Tracker  
 **Database Engine:** PostgreSQL 18 (`localhost:5432 / task_tracker_db`)  
-**Backend Framework:** Django 6.0 + Django REST Framework (DRF)
+**Backend Framework:** Django 6.0 + Django REST Framework (DRF)  
+**File Location:** `DATABASE_SCHEMA.md`  
+**Last Updated:** November 2026 (Version 2.4.5 / Build 24)
 
 ---
 
@@ -11,36 +13,35 @@
 ```mermaid
 erDiagram
     DEPARTMENT ||--o{ USER : "members (1:N)"
-    DEPARTMENT ||--o{ TASK : "department_tasks (1:N)"
-    DEPARTMENT ||--o{ ACTIVITY_LOG : "department_logs (1:N)"
+    DEPARTMENT ||--o{ TASK : "tasks (1:N)"
+    DEPARTMENT ||--o{ ACTIVITY_LOG : "activity_logs (1:N)"
+    DEPARTMENT ||--o{ ROUTINE_WORK_ITEM : "routine_items (1:N)"
 
     USER ||--o{ TASK : "created_tasks (1:N)"
     USER ||--o{ TASK : "assigned_tasks (1:N)"
     USER ||--o{ TASK : "verified_tasks (1:N)"
-    USER ||--o{ TASK_COMMENT : "authored_comments (1:N)"
-    USER ||--o{ NOTIFICATION : "received_notifications (1:N)"
-    USER ||--o{ ACTIVITY_LOG : "actor_logs (1:N)"
-    USER ||--o{ SELF_TASK : "user_self_tasks (1:N)"
-    USER ||--o{ SELF_NOTE : "user_self_notes (1:N)"
+    USER ||--o{ TASK_COMMENT : "comments (1:N)"
+    USER ||--o{ NOTIFICATION : "notifications (1:N)"
+    USER ||--o{ ACTIVITY_LOG : "activity_logs (1:N)"
+    USER ||--o{ SELF_TASK : "self_tasks (1:N)"
+    USER ||--o{ SELF_NOTE : "self_notes (1:N)"
+    USER ||--o{ USER_DEVICE : "devices (1:N)"
+    USER ||--o{ USER_SESSION_LOG : "session_logs (1:N)"
+    USER ||--o{ ROUTINE_WORK_ITEM : "assigned_routine_items (1:N)"
+    USER ||--o{ ROUTINE_WORK_ITEM : "created_routine_items (1:N)"
+    USER ||--o{ ROUTINE_WORK_ITEM : "completed_routine_items (1:N)"
+    USER ||--o{ ROUTINE_WORK_LOG : "routine_logs (1:N)"
 
     TASK ||--o{ TASK_COMMENT : "comments (1:N)"
-    TASK ||--o{ NOTIFICATION : "associated_notifications (1:N)"
-    TASK ||--o{ ACTIVITY_LOG : "task_logs (1:N)"
+    TASK ||--o{ NOTIFICATION : "notifications (1:N)"
+    TASK ||--o{ ACTIVITY_LOG : "activity_logs (1:N)"
 
-    DISPATCHED_EMAIL_LOG {
-        bigint id PK
-        varchar recipient_email
-        varchar recipient_name
-        varchar subject
-        text body
-        varchar event_type
-        timestamptz created_at
-    }
+    ROUTINE_WORK_ITEM ||--o{ ROUTINE_WORK_LOG : "logs (1:N)"
 
     DEPARTMENT {
         bigint id PK
-        varchar name UK "Unique department title"
-        varchar code UK "Short uppercase code (e.g. ENG, CCTV)"
+        varchar name UK
+        varchar code UK
         text description
         timestamptz created_at
     }
@@ -48,36 +49,37 @@ erDiagram
     USER {
         bigint id PK
         varchar username UK
+        varchar password
         varchar email
         varchar first_name
         varchar last_name
-        varchar password "Hashed PBKDF2 / Argon2"
-        varchar role "SUPER_ADMIN | GENERAL_MANAGER | DEPT_MANAGER | STAFF"
-        bigint department_id FK "Nullable for GM and SuperAdmin"
+        varchar role
+        bigint department_id FK
         varchar phone
         varchar job_title
-        jsonb allowed_pages "Dynamic page permissions"
+        jsonb allowed_pages
         boolean is_active
         boolean is_staff
         boolean is_superuser
         timestamptz date_joined
+        timestamptz last_login
     }
 
     TASK {
         bigint id PK
         varchar title
         text description
-        bigint department_id FK "Enforces query isolation"
-        bigint assigned_to_id FK "Nullable assigned staff"
-        bigint created_by_id FK "Department manager or creator"
-        varchar priority "LOW | MEDIUM | HIGH | URGENT"
-        varchar status "TODO | IN_PROGRESS | PENDING_GM_APPROVAL | CHANGES_REQUESTED | CLOSED"
+        bigint department_id FK
+        bigint assigned_to_id FK
+        bigint created_by_id FK
+        varchar priority
+        varchar status
         date due_date
-        text gm_feedback_notes "GM audit comments"
-        bigint verified_by_id FK "GM exclusive sign-off"
-        timestamptz closed_at "Recorded upon GM approval"
-        text attachment_image "Base64 / URL work proof"
-        boolean is_gm_own_task "GM personal private task flag"
+        text gm_feedback_notes
+        bigint verified_by_id FK
+        timestamptz closed_at
+        text attachment_image
+        boolean is_gm_own_task
         timestamptz created_at
         timestamptz updated_at
     }
@@ -95,29 +97,39 @@ erDiagram
         bigint recipient_id FK
         varchar title
         text message
-        varchar notification_type "GM_REVIEW_REQUEST | GM_APPROVED | etc."
-        bigint task_id FK "Nullable"
+        varchar notification_type
+        bigint task_id FK
         boolean is_read
+        timestamptz created_at
+    }
+
+    DISPATCHED_EMAIL_LOG {
+        bigint id PK
+        varchar recipient_email
+        varchar recipient_name
+        varchar subject
+        text body
+        varchar event_type
         timestamptz created_at
     }
 
     ACTIVITY_LOG {
         bigint id PK
-        bigint user_id FK "Actor (Nullable if deleted)"
-        varchar action "CREATED_TASK | GM_VERIFIED_TASK | etc."
+        bigint user_id FK
+        varchar action
         text details
-        bigint department_id FK "Nullable"
-        bigint task_id FK "Nullable"
+        bigint department_id FK
+        bigint task_id FK
         timestamptz timestamp
     }
 
     SELF_TASK {
         bigint id PK
-        bigint user_id FK "Task owner"
+        bigint user_id FK
         varchar title
         text description
-        varchar priority "LOW | MEDIUM | HIGH | URGENT"
-        varchar status "TODO | IN_PROGRESS | COMPLETED"
+        varchar priority
+        varchar status
         date due_date
         boolean is_completed
         timestamptz created_at
@@ -126,14 +138,72 @@ erDiagram
 
     SELF_NOTE {
         bigint id PK
-        bigint user_id FK "Note owner"
+        bigint user_id FK
         varchar title
         text content
-        varchar category "GENERAL | WORK | MEETING | IDEA | CHECKLIST"
+        varchar category
         varchar color
         boolean is_pinned
+        date reminder_date
+        time reminder_time
+        boolean reminder_enabled
+        boolean is_reminder_sent
         timestamptz created_at
         timestamptz updated_at
+    }
+
+    USER_DEVICE {
+        bigint id PK
+        bigint user_id FK
+        varchar device_token UK
+        varchar device_type
+        varchar device_name
+        varchar app_version
+        boolean is_active
+        timestamptz last_seen
+        timestamptz created_at
+    }
+
+    USER_SESSION_LOG {
+        bigint id PK
+        bigint user_id FK
+        varchar session_key
+        varchar platform
+        varchar device_info
+        varchar ip_address
+        text user_agent
+        timestamptz login_time
+        timestamptz logout_time
+        timestamptz last_activity
+        boolean is_active
+    }
+
+    ROUTINE_WORK_ITEM {
+        bigint id PK
+        varchar title
+        text description
+        varchar frequency
+        bigint department_id FK
+        bigint assigned_to_id FK
+        bigint created_by_id FK
+        varchar priority
+        varchar target_time
+        boolean is_active
+        timestamptz last_completed_at
+        bigint last_completed_by_id FK
+        text completion_notes
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    ROUTINE_WORK_LOG {
+        bigint id PK
+        bigint item_id FK
+        bigint completed_by_id FK
+        timestamptz completed_at
+        varchar period_identifier
+        text notes
+        varchar status
     }
 ```
 
@@ -149,7 +219,7 @@ Autonomous enterprise business units with backend-enforced query isolation.
 | `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
 | `name` | `VARCHAR(100)` | ❌ No | **UNIQUE** - Department full title (e.g. `CCTV & Surveillance`) |
 | `code` | `VARCHAR(10)` | ❌ No | **UNIQUE** - Uppercase identifier code (e.g. `CCTV`, `ENG`, `MKT`) |
-| `description` | `TEXT` |  Yes | Functional scope and operational duties |
+| `description` | `TEXT` | ✅ Yes | Functional scope and operational duties |
 | `created_at` | `TIMESTAMPTZ` | ❌ No | Auto timestamp when department was provisioned |
 
 ---
@@ -162,18 +232,19 @@ Extends Django's `AbstractUser` with enterprise role-based access control (RBAC)
 | `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
 | `username` | `VARCHAR(150)` | ❌ No | **UNIQUE** - Account login identifier |
 | `password` | `VARCHAR(128)` | ❌ No | Cryptographically salted PBKDF2 hash |
-| `email` | `VARCHAR(254)` |  Yes | Notifications dispatch email |
-| `first_name` | `VARCHAR(150)` |  Yes | User given name |
-| `last_name` | `VARCHAR(150)` |  Yes | User surname |
+| `email` | `VARCHAR(254)` | ✅ Yes | Notifications dispatch email |
+| `first_name` | `VARCHAR(150)` | ✅ Yes | User given name |
+| `last_name` | `VARCHAR(150)` | ✅ Yes | User surname |
 | `role` | `VARCHAR(20)` | ❌ No | Role enum: `SUPER_ADMIN`, `GENERAL_MANAGER`, `DEPT_MANAGER`, `STAFF` |
-| `department_id` | `BIGINT` |  Yes | **Foreign Key** (`tasks_department.id`, `ON DELETE SET NULL`) |
-| `job_title` | `VARCHAR(100)` |  Yes | Corporate designation (e.g. `Surveillance Monitoring Officer`) |
-| `phone` | `VARCHAR(25)` |  Yes | Contact phone number |
+| `department_id` | `BIGINT` | ✅ Yes | **Foreign Key** (`tasks_department.id`, `ON DELETE SET NULL`) |
+| `job_title` | `VARCHAR(100)` | ✅ Yes | Corporate designation (e.g. `Surveillance Monitoring Officer`) |
+| `phone` | `VARCHAR(25)` | ✅ Yes | Contact phone number |
 | `allowed_pages` | `JSONB` | ❌ No | Accessible pages list (e.g. `['board', 'table', 'self_desk']`) |
 | `is_active` | `BOOLEAN` | ❌ No | Default `TRUE` |
 | `is_staff` | `BOOLEAN` | ❌ No | Django admin panel access flag |
 | `is_superuser` | `BOOLEAN` | ❌ No | Full system bypass flag |
 | `date_joined` | `TIMESTAMPTZ` | ❌ No | Account creation timestamp |
+| `last_login` | `TIMESTAMPTZ` | ✅ Yes | Last login timestamp |
 
 ---
 
@@ -184,18 +255,18 @@ Core tracking entity with departmental query scoping and exclusive GM verificati
 | :--- | :--- | :---: | :--- |
 | `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
 | `title` | `VARCHAR(255)` | ❌ No | Task deliverable summary |
-| `description` | `TEXT` |  Yes | Full technical specifications |
+| `description` | `TEXT` | ✅ Yes | Full technical specifications |
 | `department_id` | `BIGINT` | ❌ No | **Foreign Key** (`tasks_department.id`, `ON DELETE CASCADE`) |
-| `assigned_to_id` | `BIGINT` |  Yes | **Foreign Key** (`tasks_user.id`, `ON DELETE SET NULL`) |
+| `assigned_to_id` | `BIGINT` | ✅ Yes | **Foreign Key** (`tasks_user.id`, `ON DELETE SET NULL`) |
 | `created_by_id` | `BIGINT` | ❌ No | **Foreign Key** (`tasks_user.id`, `ON DELETE CASCADE`) |
 | `priority` | `VARCHAR(20)` | ❌ No | Enum: `LOW`, `MEDIUM`, `HIGH`, `URGENT` (Default: `MEDIUM`) |
 | `status` | `VARCHAR(30)` | ❌ No | State machine: `TODO`, `IN_PROGRESS`, `PENDING_GM_APPROVAL`, `CHANGES_REQUESTED`, `CLOSED` |
-| `due_date` | `DATE` |  Yes | Completion target date |
-| `gm_feedback_notes` | `TEXT` |  Yes | Audit remarks entered by General Manager |
-| `verified_by_id` | `BIGINT` |  Yes | **Foreign Key** (`tasks_user.id`, `ON DELETE SET NULL`) - GM sign-off |
-| `closed_at` | `TIMESTAMPTZ` |  Yes | Populated exclusively upon GM sign-off |
-| `attachment_image`| `TEXT` |  Yes | Base64 string or image URL proof |
-| `is_gm_own_task` | `BOOLEAN` | ❌ No | GM personal private task flag (Default: `FALSE`) |
+| `due_date` | `DATE` | ✅ Yes | Completion target date |
+| `gm_feedback_notes` | `TEXT` | ✅ Yes | Audit remarks entered by General Manager |
+| `verified_by_id` | `BIGINT` | ✅ Yes | **Foreign Key** (`tasks_user.id`, `ON DELETE SET NULL`) - GM sign-off |
+| `closed_at` | `TIMESTAMPTZ` | ✅ Yes | Populated exclusively upon GM sign-off |
+| `attachment_image`| `TEXT` | ✅ Yes | JSON array / Base64 string of work proof attachments |
+| `is_gm_own_task` | `BOOLEAN` | ❌ No | **Indexed**. GM personal private task flag (Default: `FALSE`) |
 | `created_at` | `TIMESTAMPTZ` | ❌ No | Creation timestamp |
 | `updated_at` | `TIMESTAMPTZ` | ❌ No | Last modified timestamp |
 
@@ -224,7 +295,7 @@ Real-time alerts delivered to users on task status transitions.
 | `title` | `VARCHAR(255)` | ❌ No | Alert title |
 | `message` | `TEXT` | ❌ No | Detailed notification body |
 | `notification_type` | `VARCHAR(50)` | ❌ No | Type tag (`GM_REVIEW_REQUEST`, `TASK_ASSIGNED`, etc.) |
-| `task_id` | `BIGINT` |  Yes | **Foreign Key** (`tasks_task.id`, `ON DELETE CASCADE`) |
+| `task_id` | `BIGINT` | ✅ Yes | **Foreign Key** (`tasks_task.id`, `ON DELETE CASCADE`) |
 | `is_read` | `BOOLEAN` | ❌ No | Default `FALSE` |
 | `created_at` | `TIMESTAMPTZ` | ❌ No | Timestamp |
 
@@ -237,7 +308,7 @@ Audit log of all system emails dispatched on task events.
 | :--- | :--- | :---: | :--- |
 | `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
 | `recipient_email` | `VARCHAR(255)` | ❌ No | Recipient destination email |
-| `recipient_name` | `VARCHAR(255)` |  Yes | Full name of recipient |
+| `recipient_name` | `VARCHAR(255)` | ✅ Yes | Full name of recipient |
 | `subject` | `VARCHAR(255)` | ❌ No | Email subject line |
 | `body` | `TEXT` | ❌ No | Full email content |
 | `event_type` | `VARCHAR(50)` | ❌ No | Event trigger tag |
@@ -251,11 +322,11 @@ Append-only tamper-evident compliance audit trail.
 | Column | Data Type | Nullable | Constraints / Description |
 | :--- | :--- | :---: | :--- |
 | `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
-| `user_id` | `BIGINT` |  Yes | **Foreign Key** (`tasks_user.id`, `ON DELETE SET NULL`) |
+| `user_id` | `BIGINT` | ✅ Yes | **Foreign Key** (`tasks_user.id`, `ON DELETE SET NULL`) |
 | `action` | `VARCHAR(100)` | ❌ No | Action identifier (e.g. `CREATED_TASK`, `GM_VERIFIED_TASK`) |
 | `details` | `TEXT` | ❌ No | Human-readable event description |
-| `department_id` | `BIGINT` |  Yes | **Foreign Key** (`tasks_department.id`, `ON DELETE SET NULL`) |
-| `task_id` | `BIGINT` |  Yes | **Foreign Key** (`tasks_task.id`, `ON DELETE SET NULL`) |
+| `department_id` | `BIGINT` | ✅ Yes | **Foreign Key** (`tasks_department.id`, `ON DELETE SET NULL`) |
+| `task_id` | `BIGINT` | ✅ Yes | **Foreign Key** (`tasks_task.id`, `ON DELETE SET NULL`) |
 | `timestamp` | `TIMESTAMPTZ` | ❌ No | Timestamp |
 
 ---
@@ -268,17 +339,17 @@ User-level private task checklist for individual organization and self-work.
 | `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
 | `user_id` | `BIGINT` | ❌ No | **Foreign Key** (`tasks_user.id`, `ON DELETE CASCADE`) - Task owner |
 | `title` | `VARCHAR(255)` | ❌ No | Self task summary |
-| `description` | `TEXT` |  Yes | Task details / notes |
+| `description` | `TEXT` | ✅ Yes | Task details / notes |
 | `priority` | `VARCHAR(20)` | ❌ No | `LOW`, `MEDIUM`, `HIGH`, `URGENT` (Default: `MEDIUM`) |
 | `status` | `VARCHAR(20)` | ❌ No | `TODO`, `IN_PROGRESS`, `COMPLETED` (Default: `TODO`) |
-| `due_date` | `DATE` |  Yes | Personal target date |
+| `due_date` | `DATE` | ✅ Yes | Personal target date |
 | `is_completed` | `BOOLEAN` | ❌ No | Completion toggle (Default: `FALSE`) |
 | `created_at` | `TIMESTAMPTZ` | ❌ No | Creation timestamp |
 | `updated_at` | `TIMESTAMPTZ` | ❌ No | Modification timestamp |
 
 ---
 
-### Table: `tasks_selfnote` (Personal Memos & Quick Notes)
+### Table: `tasks_selfnote` (Personal Memos & Reminders)
 Sticky notes, project ideas, checklists, and scratch notes personal to each user.
 
 | Column | Data Type | Nullable | Constraints / Description |
@@ -286,12 +357,92 @@ Sticky notes, project ideas, checklists, and scratch notes personal to each user
 | `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
 | `user_id` | `BIGINT` | ❌ No | **Foreign Key** (`tasks_user.id`, `ON DELETE CASCADE`) - Note owner |
 | `title` | `VARCHAR(255)` | ❌ No | Note headline / subject |
-| `content` | `TEXT` |  Yes | Detailed body or markdown checklist |
+| `content` | `TEXT` | ✅ Yes | Detailed body or markdown checklist |
 | `category` | `VARCHAR(30)` | ❌ No | `GENERAL`, `WORK`, `MEETING`, `IDEA`, `CHECKLIST` |
-| `color` | `VARCHAR(30)` |  Yes | Visual sticky card color theme |
+| `color` | `VARCHAR(30)` | ✅ Yes | Visual sticky card color theme |
 | `is_pinned` | `BOOLEAN` | ❌ No | Pin to top toggle (Default: `FALSE`) |
+| `reminder_date` | `DATE` | ✅ Yes | Target date for scheduled reminder alert |
+| `reminder_time` | `TIME` | ✅ Yes | Target time for reminder notification |
+| `reminder_enabled`| `BOOLEAN` | ❌ No | Toggle activating reminder alerts |
+| `is_reminder_sent` | `BOOLEAN` | ❌ No | Flag preventing duplicate reminder dispatches |
 | `created_at` | `TIMESTAMPTZ` | ❌ No | Creation timestamp |
 | `updated_at` | `TIMESTAMPTZ` | ❌ No | Modification timestamp |
+
+---
+
+### Table: `tasks_userdevice` (Mobile Push Tokens & Devices)
+FCM device tokens and hardware metadata for Android / iOS push notifications.
+
+| Column | Data Type | Nullable | Constraints / Description |
+| :--- | :--- | :---: | :--- |
+| `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
+| `user_id` | `BIGINT` | ❌ No | **Foreign Key** (`tasks_user.id`, `ON DELETE CASCADE`) |
+| `device_token` | `VARCHAR(255)` | ❌ No | **UNIQUE**, **Indexed**. Unique FCM push token |
+| `device_type` | `VARCHAR(50)` | ❌ No | Device OS: `android`, `ios`, `web` |
+| `device_name` | `VARCHAR(150)` | ✅ Yes | Hardware model (e.g. `Samsung Galaxy A54`) |
+| `app_version` | `VARCHAR(50)` | ✅ Yes | Installed mobile client build |
+| `is_active` | `BOOLEAN` | ❌ No | Whether push token is currently active |
+| `last_seen` | `TIMESTAMPTZ` | ❌ No | Heartbeat timestamp of last device activity |
+| `created_at` | `TIMESTAMPTZ` | ❌ No | Initial device registration timestamp |
+
+---
+
+### Table: `tasks_usersessionlog` (Active Sessions & Security Log)
+Real-time session monitoring tracking active logins, IP addresses, and user-agent environments.
+
+| Column | Data Type | Nullable | Constraints / Description |
+| :--- | :--- | :---: | :--- |
+| `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
+| `user_id` | `BIGINT` | ❌ No | **Foreign Key** (`tasks_user.id`, `ON DELETE CASCADE`) |
+| `session_key` | `VARCHAR(100)` | ✅ Yes | Unique session or auth token hash identifier |
+| `platform` | `VARCHAR(50)` | ❌ No | Platform: `mobile_apk`, `web`, `ios`, `android` |
+| `device_info` | `VARCHAR(255)` | ✅ Yes | Client user-agent summary or device brand string |
+| `ip_address` | `VARCHAR(60)` | ✅ Yes | Remote client IP address |
+| `user_agent` | `TEXT` | ✅ Yes | Raw HTTP User-Agent header string |
+| `login_time` | `TIMESTAMPTZ` | ❌ No | Session start timestamp |
+| `logout_time` | `TIMESTAMPTZ` | ✅ Yes | Explicit logout timestamp |
+| `last_activity` | `TIMESTAMPTZ` | ❌ No | Heartbeat timestamp of latest API request |
+| `is_active` | `BOOLEAN` | ❌ No | **Indexed**. Current active session state flag |
+
+---
+
+### Table: `tasks_routineworkitem` (Recurring Routine Work Items)
+Standard Operating Procedure (SOP) recurring checklist items.
+
+| Column | Data Type | Nullable | Constraints / Description |
+| :--- | :--- | :---: | :--- |
+| `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
+| `title` | `VARCHAR(255)` | ❌ No | Routine checklist item title |
+| `description` | `TEXT` | ✅ Yes | Detailed inspection procedure or steps |
+| `frequency` | `VARCHAR(20)` | ❌ No | **Indexed**. `DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY` |
+| `department_id` | `BIGINT` | ✅ Yes | **Foreign Key** (`tasks_department.id`, `ON DELETE SET NULL`) |
+| `assigned_to_id` | `BIGINT` | ✅ Yes | **Foreign Key** (`tasks_user.id`, `ON DELETE SET NULL`) |
+| `created_by_id` | `BIGINT` | ❌ No | **Foreign Key** (`tasks_user.id`, `ON DELETE CASCADE`) |
+| `priority` | `VARCHAR(20)` | ❌ No | `LOW`, `MEDIUM`, `HIGH`, `URGENT` (Default: `MEDIUM`) |
+| `target_time` | `VARCHAR(100)` | ✅ Yes | Recommended inspection time |
+| `is_active` | `BOOLEAN` | ❌ No | **Indexed**. Routine active toggle |
+| `last_completed_at`| `TIMESTAMPTZ`| ✅ Yes | Timestamp of most recent completion |
+| `last_completed_by_id`| `BIGINT` | ✅ Yes | **Foreign Key** (`tasks_user.id`, `ON DELETE SET NULL`) |
+| `completion_notes` | `TEXT` | ✅ Yes | Notes from latest verification |
+| `created_at` | `TIMESTAMPTZ` | ❌ No | Template creation timestamp |
+| `updated_at` | `TIMESTAMPTZ` | ❌ No | Last updated timestamp |
+
+---
+
+### Table: `tasks_routineworklog` (Routine Execution History)
+Historical execution audit log confirming periodic completion of routine items.
+
+| Column | Data Type | Nullable | Constraints / Description |
+| :--- | :--- | :---: | :--- |
+| `id` | `BIGSERIAL` | ❌ No | **Primary Key** |
+| `item_id` | `BIGINT` | ❌ No | **Foreign Key** (`tasks_routineworkitem.id`, `ON DELETE CASCADE`) |
+| `completed_by_id` | `BIGINT` | ✅ Yes | **Foreign Key** (`tasks_user.id`, `ON DELETE SET NULL`) |
+| `completed_at` | `TIMESTAMPTZ` | ❌ No | Accurate completion timestamp |
+| `period_identifier`| `VARCHAR(50)` | ❌ No | **Indexed**. Cadence key (e.g. `2026-11-07`, `2026-W45`) |
+| `notes` | `TEXT` | ✅ Yes | Completion remarks |
+| `status` | `VARCHAR(20)` | ❌ No | Status tag (`COMPLETED`) |
+
+> **Unique Constraint:** `UNIQUE ("item_id", "period_identifier")`
 
 ---
 
@@ -331,3 +482,5 @@ stateDiagram-v2
 3. **Task Deletion (`Task` &rarr; `Comments` / `Notifications` / `Audit`)**:
    * Comments and Notifications are strictly bound to tasks and cascade (`ON DELETE CASCADE`).
    * Activity logs preserve the action history with `task_id = NULL` (`ON DELETE SET NULL`).
+4. **Routine Items (`RoutineWorkItem` &rarr; `RoutineWorkLog`)**:
+   * Deleting a routine work item cascades its log records (`ON DELETE CASCADE`).
