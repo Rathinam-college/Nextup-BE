@@ -715,20 +715,23 @@ class TaskViewSet(viewsets.ModelViewSet):
     def check_timeline_reminders(self, request):
         """
         Scans all open tasks and dispatches reminder emails for approaching deadlines or overdue tasks.
+        Active Schedule: Monday to Saturday (Sunday is a weekly holiday, silenced unless force=True).
         """
         if not request.user.is_gm_or_super() and request.user.role != User.ROLE_DEPT_MANAGER:
             raise PermissionDenied("Only managers and administrators can trigger system-wide timeline checks.")
 
-        result = check_and_dispatch_all_timeline_reminders()
+        force = request.data.get('force', False)
+        result = check_and_dispatch_all_timeline_reminders(force=force)
         log_activity(
             request.user,
             "CHECKED_TIMELINES",
             f"Scanned upcoming deadlines: {result['tasks_checked']} active tasks checked, {result['emails_dispatched']} reminder emails sent.",
             department=request.user.department
         )
+        msg = result.get('holiday_notice') or f"Timeline scan complete: {result['tasks_checked']} tasks inspected, {result['emails_dispatched']} reminder emails dispatched."
         return Response({
             'status': 'success',
-            'message': f"Timeline scan complete: {result['tasks_checked']} tasks inspected, {result['emails_dispatched']} reminder emails dispatched.",
+            'message': msg,
             'details': result
         })
 
@@ -826,15 +829,23 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     def trigger_hourly_reminder(self, request):
         """
         Trigger the continuous 1-hour work update reminder for current user or all staff.
+        Active Schedule: Monday to Saturday, 9:00 AM – 6:00 PM IST (Sunday is a holiday).
         """
-        from .services import dispatch_hourly_work_reminders
+        from .services import dispatch_hourly_work_reminders, is_sunday_holiday
         target_all = request.data.get('all', False) and (
             getattr(request.user, 'role', '') in ['SUPER_ADMIN', 'GENERAL_MANAGER']
         )
-        count = dispatch_hourly_work_reminders(user=None if target_all else request.user)
+        force = request.data.get('force', False)
+        count = dispatch_hourly_work_reminders(user=None if target_all else request.user, force=force)
+        
+        if count == 0 and is_sunday_holiday() and not force:
+            message = "Today is Sunday (Weekly Holiday). Staff check-in notifications and emails are paused (Monday to Saturday only)."
+        else:
+            message = f"Continuous 1-hour work update reminder dispatched to {count} recipient(s)."
+
         return Response({
             "status": "success",
-            "message": f"Continuous 1-hour work update reminder dispatched to {count} recipient(s).",
+            "message": message,
             "dispatched_count": count
         })
 
@@ -849,17 +860,21 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     def trigger_urgent_reminders(self, request):
         """
         Dispatches push notifications and emails for all tasks that are URGENT priority or due today / overdue.
+        Active Schedule: Monday to Saturday (Sunday is a holiday).
         """
         from .services import dispatch_urgent_and_due_date_reminders
         target_all = request.data.get('all', False) and (
             getattr(request.user, 'role', '') in ['SUPER_ADMIN', 'GENERAL_MANAGER']
         )
-        res = dispatch_urgent_and_due_date_reminders(user=None if target_all else request.user)
+        force = request.data.get('force', False)
+        res = dispatch_urgent_and_due_date_reminders(user=None if target_all else request.user, force=force)
+        msg = res.get('holiday_notice') or f"Urgent and Due Date push alerts dispatched for {res['count']} task(s)."
         return Response({
             "status": "success",
-            "message": f"Urgent and Due Date push alerts dispatched for {res['count']} task(s).",
+            "message": msg,
             "count": res['count'],
-            "tasks": res['tasks']
+            "tasks": res['tasks'],
+            "holiday_notice": res.get('holiday_notice', None)
         })
 
 

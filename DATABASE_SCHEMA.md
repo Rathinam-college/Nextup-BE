@@ -10,6 +10,11 @@
 
 ## 1. Visual Entity-Relationship (ER) Diagram
 
+> [!NOTE]
+> **Working Cadence & Weekly Holiday Schedule**:  
+> Active enterprise working hours operate **Monday to Saturday from 9:00 AM to 6:00 PM IST**.  
+> **Sunday is an official weekly holiday** — all automated background notification schedulers, hourly staff check-in emails, and deadline timeline scans are strictly paused on Sundays.
+
 ```mermaid
 erDiagram
     DEPARTMENT ||--o{ USER : "members (1:N)"

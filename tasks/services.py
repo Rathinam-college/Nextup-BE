@@ -32,12 +32,38 @@ def get_india_current_time():
     return timezone.now().astimezone(india_tz)
 
 
-def is_within_india_work_hours():
+def is_india_work_day(dt=None):
+    """
+    Checks if a given datetime (or current IST time) is an active working day.
+    Active Working Days: Monday to Saturday (Python weekday() 0 through 5).
+    Weekly Holiday: Sunday (Python weekday() == 6).
+    """
+    if dt is None:
+        dt = get_india_current_time()
+    return dt.weekday() != 6
+
+
+def is_sunday_holiday(dt=None):
+    """
+    Checks if a given datetime (or current IST time) is Sunday (weekly holiday).
+    Sunday is a college holiday: automated notifications and emails are silenced.
+    """
+    if dt is None:
+        dt = get_india_current_time()
+    return dt.weekday() == 6
+
+
+def is_within_india_work_hours(dt=None):
     """
     Checks if current India Standard Time (IST) is strictly within
-    the 9:00 AM to 6:00 PM working window (09:00 through 18:00 IST).
+    official working days and hours:
+    - Working Days: Monday to Saturday (Monday=0 ... Saturday=5)
+    - Weekly Holiday: Sunday (returns False)
+    - Working Hours: 9:00 AM to 6:00 PM IST (540 through 1080 minutes)
     """
-    now_ist = get_india_current_time()
+    now_ist = dt or get_india_current_time()
+    if not is_india_work_day(now_ist):
+        return False
     total_minutes = now_ist.hour * 60 + now_ist.minute
     return 540 <= total_minutes <= 1080  # 9:00 AM (540m) to 6:00 PM (1080m)
 
@@ -1398,12 +1424,23 @@ def notify_timeline_reminder(task, triggered_by=None):
     return logs
 
 
-def check_and_dispatch_all_timeline_reminders():
+def check_and_dispatch_all_timeline_reminders(force=False):
     """
     Checks all active non-closed tasks with due dates and dispatches
     timeline reminder emails for tasks that are overdue, due today, or due in <= 2 days.
+    Active Schedule: Monday to Saturday. Sunday is a weekly holiday (silenced unless force=True).
     """
-    today = timezone.now().date()
+    now_ist = get_india_current_time()
+    if not force and is_sunday_holiday(now_ist):
+        print("[TimelineReminder] 🏖️ Today is Sunday (Weekly Holiday). Automated deadline reminder emails & notifications are paused.")
+        return {
+            'tasks_checked': 0,
+            'emails_dispatched': 0,
+            'items': [],
+            'holiday_notice': 'Sunday is a weekly holiday. Automated deadline reminder emails and notifications are paused (Monday to Saturday only).'
+        }
+
+    today = now_ist.date()
     two_days_out = today + timezone.timedelta(days=2)
 
     active_tasks = Task.objects.exclude(status=Task.STATUS_CLOSED).filter(
@@ -2054,14 +2091,24 @@ def push_message_to_assigned_staff(task, sender_user, message_text, send_email=T
     }
 
 
-def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
+def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False, force=False):
     """
-    Dispatches 1-hour recurring work check-in reminder during India working hours (9:00 AM to 6:00 PM IST).
+    Dispatches 1-hour recurring work check-in reminder during India working hours:
+    Monday to Saturday, 9:00 AM to 6:00 PM IST.
+    Sunday is an official weekly holiday: automated emails and notifications are silenced!
     If user has urgent or due date tasks, the push notification explicitly highlights them with all details!
     """
     now_ist = get_india_current_time()
-    if enforce_work_hours and not is_within_india_work_hours():
-        print(f"[HourlyReminder] Outside India working hours (Current IST: {now_ist.strftime('%I:%M %p')}). Reminders run between 9:00 AM and 6:00 PM IST.")
+
+    # CRITICAL RULE: Sunday is a weekly holiday. Do not send automated check-in emails & notifications on Sunday!
+    if not force and is_sunday_holiday(now_ist):
+        print(f"[HourlyReminder] 🏖️ Today is Sunday (Weekly Holiday). Staff check-in notifications and emails are silenced.")
+        return 0
+
+    if enforce_work_hours and not force and not is_within_india_work_hours(now_ist):
+        day_str = now_ist.strftime('%A')
+        time_str = now_ist.strftime('%I:%M %p')
+        print(f"[HourlyReminder] Outside working window ({day_str} {time_str} IST). Active schedule: Monday to Saturday, 9:00 AM – 6:00 PM IST (Sunday Holiday).")
         return 0
 
     if user:
@@ -2072,6 +2119,7 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
     today = now_ist.date()
     count = 0
     now_str = now_ist.strftime('%I:%M %p')
+    day_name = now_ist.strftime('%A')
 
     for r in recipients:
         try:
@@ -2093,10 +2141,10 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
                 else:
                     tag = "URGENT PRIORITY"
 
-                subject = f"🚨 [9AM-6PM IST Check-In] {urgent_count} Urgent / Due Deliverable(s)"
+                subject = f"🚨 [Mon–Sat 9AM–6PM Check-In] {urgent_count} Urgent / Due Deliverable(s)"
                 body = (
                     f"Hello {r.get_full_name() or r.username},\n\n"
-                    f"This is your hourly work check-in ({now_str} IST • 9:00 AM – 6:00 PM Work Hours).\n\n"
+                    f"This is your hourly work check-in ({now_str} IST • {day_name} • Monday to Saturday Work Hours).\n\n"
                     f"⚠️ ATTENTION - PENDING URGENT DELIVERABLE:\n"
                     f"• Task: #{top_task.id} '{top_task.title}'\n"
                     f"• Department: {top_task.department.name} ({top_task.department.code})\n"
@@ -2113,7 +2161,7 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
                     badge_variant="urgent",
                     headline=f"Urgent Deliverable Alert ({now_str} IST)",
                     intro_lines=[
-                        f"This is your continuous 1-hour work check-in reminder during India working hours (9:00 AM – 6:00 PM IST).",
+                        f"This is your continuous 1-hour work check-in reminder during working hours (Monday to Saturday, 9:00 AM – 6:00 PM IST • Sunday Holiday).",
                         f"<strong>⚠️ Attention:</strong> You have <strong>{urgent_count} urgent / pending deliverable(s)</strong> awaiting completion."
                     ],
                     details_dict=[
@@ -2122,6 +2170,7 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
                         ("Priority", top_task.get_priority_display()),
                         ("Target Due Date", f"{top_task.due_date or 'Immediate'} ({tag})"),
                         ("Status Notice", tag),
+                        ("Working Schedule", "Monday – Saturday • 9:00 AM – 6:00 PM IST (Sunday Holiday)"),
                         ("Total Urgent Tasks", str(urgent_count)),
                     ],
                     description_text=(top_task.description or "").strip(),
@@ -2135,20 +2184,20 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
                 push_body = (
                     f"⚠️ #{top_task.id} {top_task.title}\n"
                     f"Priority: {top_task.get_priority_display()} • Due: {top_task.due_date or 'Immediate'} ({tag})\n"
-                    f"Dept: {top_task.department.code if top_task.department else 'General'} • Please update progress!"
+                    f"Dept: {top_task.department.code if top_task.department else 'General'} • Work Hours: Mon–Sat 9AM–6PM"
                 )
                 top_task_obj = top_task
             else:
                 active_count = active_tasks.count()
-                subject = f"⏰ Hourly Work Check-In ({now_str} IST)"
+                subject = f"⏰ Hourly Work Check-In ({now_str} IST • Mon–Sat)"
                 body = (
                     f"Hello {r.get_full_name() or r.username},\n\n"
-                    f"This is your continuous 1-hour work check-in reminder (9:00 AM - 6:00 PM IST).\n"
+                    f"This is your continuous 1-hour work check-in reminder (Monday to Saturday, 9:00 AM – 6:00 PM IST • Sunday Holiday).\n"
                     f"Active deliverables: {active_count} tasks in progress.\n"
                     f"Please keep your active tasks, progress reports, and deliverables current."
                 )
                 intro = [
-                    f"This is your continuous 1-hour work check-in reminder during India working hours (9:00 AM – 6:00 PM IST)."
+                    f"This is your continuous 1-hour work check-in reminder during working hours (Monday to Saturday, 9:00 AM – 6:00 PM IST • Sunday Holiday)."
                 ]
                 if active_count == 0:
                     intro.append("You currently have <strong>0 active tasks in progress</strong>. You're all caught up! Keep up the momentum or review upcoming department deliverables on the portal.")
@@ -2156,8 +2205,8 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
                     intro.append(f"You currently have <strong>{active_count} active deliverable(s)</strong> in progress. Please keep your active tasks, progress reports, and milestone updates current.")
 
                 details_list = [
-                    ("Check-In Time", f"{now_str} IST"),
-                    ("Working Window", "9:00 AM – 6:00 PM IST"),
+                    ("Check-In Time", f"{now_str} IST ({day_name})"),
+                    ("Working Schedule", "Monday – Saturday • 9:00 AM – 6:00 PM IST (Sunday Holiday)"),
                     ("Active Deliverables", f"{active_count} task{'s' if active_count != 1 else ''} in progress"),
                 ]
 
@@ -2177,7 +2226,7 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
                 notif_title = f"⏰ 1-Hour Work Check-In ({now_str} IST)"
                 push_title = notif_title
                 push_body = (
-                    f"1-Hour check-in (9:00 AM – 6:00 PM IST).\n"
+                    f"1-Hour check-in (Mon–Sat, 9:00 AM – 6:00 PM IST • Sunday Holiday).\n"
                     f"You have {active_count} active task(s) in progress. Please review and update deliverables on NextUp."
                 )
                 top_task_obj = None
@@ -2200,17 +2249,27 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False):
     return count
 
 
-def dispatch_daily_9am_work_reminders(user=None):
+def dispatch_daily_9am_work_reminders(user=None, force=False):
     """Backward-compatible alias for dispatch_hourly_work_reminders"""
-    return dispatch_hourly_work_reminders(user=user)
+    return dispatch_hourly_work_reminders(user=user, force=force)
 
 
-def dispatch_urgent_and_due_date_reminders(user=None):
+def dispatch_urgent_and_due_date_reminders(user=None, force=False):
     """
     Specifically scans and dispatches push notifications and emails for tasks
     that are marked as URGENT priority, or have a due date of TODAY or are OVERDUE.
+    Active Schedule: Monday to Saturday. Sunday is a weekly holiday (silenced unless force=True).
     """
-    today = timezone.now().date()
+    now_ist = get_india_current_time()
+    if not force and is_sunday_holiday(now_ist):
+        print("[UrgentReminder] 🏖️ Today is Sunday (Weekly Holiday). Urgent reminder notifications and emails are paused.")
+        return {
+            'count': 0,
+            'tasks': [],
+            'holiday_notice': 'Sunday is a weekly holiday. Urgent reminder notifications and emails are paused (Monday to Saturday only).'
+        }
+
+    today = now_ist.date()
     tomorrow = today + timezone.timedelta(days=1)
 
     tasks_qs = Task.objects.exclude(status=Task.STATUS_CLOSED).filter(

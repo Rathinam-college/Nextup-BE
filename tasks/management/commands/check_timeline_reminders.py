@@ -5,13 +5,24 @@ from tasks.services import check_and_dispatch_all_timeline_reminders
 logger = logging.getLogger(__name__)
 
 class Command(BaseCommand):
-    help = 'Scans all active tasks with deadlines, calculates relative timelines, and dispatches automated reminder emails.'
+    help = 'Scans all active tasks with deadlines, calculates relative timelines, and dispatches automated reminder emails (Monday to Saturday, silenced on Sunday).'
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--force',
+            action='store_true',
+            help='Force timeline check even if today is Sunday (holiday).',
+        )
 
     def handle(self, *args, **options):
-        self.stdout.write(self.style.NOTICE("[TIMELINE] Starting task timeline deadline scanner..."))
+        force = options.get('force', False)
+        self.stdout.write(self.style.NOTICE("[TIMELINE] Starting task timeline deadline scanner (Active: Mon-Sat, Sunday Holiday)..."))
         
         try:
-            results = check_and_dispatch_all_timeline_reminders()
+            results = check_and_dispatch_all_timeline_reminders(force=force)
+            if results.get('holiday_notice'):
+                self.stdout.write(self.style.WARNING(f"[HOLIDAY] {results['holiday_notice']}"))
+                return
             
             self.stdout.write(self.style.SUCCESS(
                 f"[OK] Timeline scan finished successfully!\n"
