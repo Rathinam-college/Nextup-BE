@@ -2265,18 +2265,18 @@ def get_app_version(request):
                 pass
 
     return Response({
-        "version": "2.4.5",
-        "versionCode": 24,
+        "version": "2.4.6",
+        "versionCode": 25,
         "apkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
         "fallbackApkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
         "releaseNotes": [
-            "Task Details Error Resolved: Fixed 'Rendered more hooks than during previous render' React error when clicking a task to view details",
-            "Task Crash Fix: Eliminated Android task modal crashes with ErrorBoundary & safe rendering",
-            "PowerPoint Presentation Support: Upload, view, and manage .ppt and .pptx slides across web and mobile",
-            "Multi-Attachment Support: Upload photos, PDFs, Excel sheets, and PowerPoint presentations in tasks",
-            "Production Server Lock: Permanently direct connection to https://www.rguedu.in/nextup"
+            "Task Details Error Resolved: Fixed 'Rendered more hooks than during previous render' React hook error when opening tasks",
+            "Persistent Update Synchronization: Clean build v2.4.6 (Build 25) prevents recurring update prompts",
+            "Task Crash Protection: Safe task status and priority fallbacks in modal view",
+            "PowerPoint Presentation Support: Upload and view .ppt and .pptx presentations",
+            "Multi-Attachment Support: Upload photos, PDFs, Excel sheets, and PPT documents"
         ],
-        "publishedAt": "2026-11-05",
+        "publishedAt": "2026-11-10",
         "mandatory": False
     })
 
