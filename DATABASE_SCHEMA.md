@@ -11,9 +11,10 @@
 ## 1. Visual Entity-Relationship (ER) Diagram
 
 > [!NOTE]
-> **Working Cadence & Weekly Holiday Schedule**:  
-> Active enterprise working hours operate **Monday to Saturday from 9:00 AM to 6:00 PM IST**.  
-> **Sunday is an official weekly holiday** — all automated background notification schedulers, hourly staff check-in emails, and deadline timeline scans are strictly paused on Sundays.
+> **Working Cadence & Email Policy**:  
+> • Active working days: **Monday to Saturday from 9:00 AM to 6:00 PM IST**.  
+> • **Sunday is an official weekly holiday** — all outbound emails to users are strictly suppressed on Sundays.  
+> • **Strict Active Task Email Filter**: Emails are strictly sent only to users who have tasks in `TODO`, `IN_PROGRESS`, or `CHANGES_REQUESTED`. If a user has no active tasks in these statuses, no emails are dispatched.
 
 ```mermaid
 erDiagram

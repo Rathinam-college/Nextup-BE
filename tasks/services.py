@@ -649,12 +649,20 @@ def sync_email_credentials():
         settings.DEFAULT_FROM_EMAIL = 'nextupnotification@gmail.com'
 
 
-def send_branded_email(subject, plain_text, recipient_email, html_body=None, from_email=None):
+def send_branded_email(subject, plain_text, recipient_email, html_body=None, from_email=None, force=False):
     """
     Dispatches a branded HTML email with NextUp and Rathinam logos.
     Enforces pure HTML content type (text/html) so email clients like Microsoft Outlook,
     Exchange Online, and Gmail always render the rich card design and never fall back to plain text.
+
+    CRITICAL SUNDAY POLICY: Sunday is an official weekly holiday.
+    No emails are sent to users on Sunday unless explicitly forced (force=True).
     """
+    # Sunday weekly holiday check: Strictly suppress outbound emails to users
+    if not force and is_sunday_holiday():
+        print(f"[Email] 🏖️ Sunday Holiday: Outbound email to {recipient_email} strictly suppressed ('{subject}').")
+        return False
+
     try:
         sync_email_credentials()
 
@@ -734,14 +742,15 @@ def send_branded_email(subject, plain_text, recipient_email, html_body=None, fro
         return False
 
 
-def _async_send_mail(subject, body, from_email, recipient_email, html_body=None):
+def _async_send_mail(subject, body, from_email, recipient_email, html_body=None, force=False):
     """Worker function executed in background thread to avoid blocking concurrent web requests."""
     send_branded_email(
         subject=subject,
         plain_text=body,
         recipient_email=recipient_email,
         html_body=html_body,
-        from_email=from_email
+        from_email=from_email,
+        force=force,
     )
 
 
@@ -825,12 +834,15 @@ def record_user_logout(user, request=None):
             logout_time=timezone.now()
         )
 
-def dispatch_email_and_notification(recipient, subject, body, event_type, task=None, title=None, push_title=None, push_body=None, push_data=None, html_body=None):
+def dispatch_email_and_notification(recipient, subject, body, event_type, task=None, title=None, push_title=None, push_body=None, push_data=None, html_body=None, force=False):
     """
     Sends email via background thread, records it in DispatchedEmailLog,
     creates an in-app Notification, and dispatches a rich push notification
     containing ALL task details directly to mobile devices.
     Guarantees responsive HTML email template with NextUp and Rathinam logos.
+
+    CRITICAL SUNDAY POLICY: Sunday is an official weekly holiday.
+    No emails are dispatched to users on Sunday unless explicitly forced (force=True).
     """
     if not recipient:
         return None
@@ -858,21 +870,29 @@ def dispatch_email_and_notification(recipient, subject, body, event_type, task=N
             task=task
         )
 
-    # Non-blocking async dispatch: spawns background thread so HTTP worker immediately returns
-    threading.Thread(
-        target=_async_send_mail,
-        args=(subject, body, from_email, recipient.email, final_html_body),
-        daemon=True
-    ).start()
+    # Check Sunday weekly holiday rule: Suppress outbound emails to users on Sunday
+    is_sunday = is_sunday_holiday()
+    should_send_email = force or (not is_sunday)
 
-    # Log dispatched email in database for real-time audit & UI demonstration with rich HTML
-    email_log = DispatchedEmailLog.objects.create(
-        recipient_email=recipient.email,
-        recipient_name=recipient.get_full_name() or recipient.username,
-        subject=subject,
-        body=final_html_body or body,
-        event_type=event_type,
-    )
+    email_log = None
+    if should_send_email:
+        # Non-blocking async dispatch: spawns background thread so HTTP worker immediately returns
+        threading.Thread(
+            target=_async_send_mail,
+            args=(subject, body, from_email, recipient.email, final_html_body, force),
+            daemon=True
+        ).start()
+
+        # Log dispatched email in database for real-time audit & UI demonstration with rich HTML
+        email_log = DispatchedEmailLog.objects.create(
+            recipient_email=recipient.email,
+            recipient_name=recipient.get_full_name() or recipient.username,
+            subject=subject,
+            body=final_html_body or body,
+            event_type=event_type,
+        )
+    else:
+        print(f"[EmailDispatch] 🏖️ Sunday Holiday: Outbound email to {recipient.email} silenced ({event_type}).")
 
     # Create in-app Notification
     notif_title = title or subject
@@ -1347,6 +1367,10 @@ def notify_timeline_reminder(task, triggered_by=None):
     if is_gm_own_task(task):
         return []
 
+    # Strictly send mail only for tasks in TODO, IN_PROGRESS, or CHANGES_REQUESTED
+    if task.status not in [Task.STATUS_TODO, Task.STATUS_IN_PROGRESS, Task.STATUS_CHANGES_REQUESTED]:
+        return []
+
     # Strictly notify only assigned person and explicitly co-assigned team members
     recipients = get_task_target_recipients(task)
 
@@ -1443,7 +1467,9 @@ def check_and_dispatch_all_timeline_reminders(force=False):
     today = now_ist.date()
     two_days_out = today + timezone.timedelta(days=2)
 
-    active_tasks = Task.objects.exclude(status=Task.STATUS_CLOSED).filter(
+    # Strictly check only tasks in TODO, IN_PROGRESS, or CHANGES_REQUESTED
+    active_tasks = Task.objects.filter(
+        status__in=[Task.STATUS_TODO, Task.STATUS_IN_PROGRESS, Task.STATUS_CHANGES_REQUESTED],
         due_date__isnull=False,
         due_date__lte=two_days_out
     ).select_related('department', 'assigned_to')
@@ -1877,6 +1903,7 @@ def send_test_email_verification(to_email, sender_user):
             plain_text=body,
             recipient_email=to_email,
             html_body=test_html,
+            force=True,
         )
         if not success:
             email_error = "Email delivery failed. Please verify your Google App Password and SMTP connection."
@@ -2121,10 +2148,20 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False, force=Fa
     now_str = now_ist.strftime('%I:%M %p')
     day_name = now_ist.strftime('%A')
 
+    ACTIVE_STAFF_TASK_STATUSES = [Task.STATUS_TODO, Task.STATUS_IN_PROGRESS, Task.STATUS_CHANGES_REQUESTED]
+
     for r in recipients:
         try:
-            active_tasks = Task.objects.filter(assigned_to=r).exclude(status=Task.STATUS_CLOSED)
-            # CRITICAL USER RULE: Only send email if staff has active tasks! If 0 active tasks, SKIP completely!
+            active_tasks = Task.objects.filter(
+                Q(assigned_to=r) |
+                Q(description__icontains=f'"assignedToId": {r.id}') |
+                Q(description__icontains=f'"assignedToId":{r.id}') |
+                Q(description__icontains=f'"staffId": {r.id}') |
+                Q(description__icontains=f'"staffId":{r.id}'),
+                status__in=ACTIVE_STAFF_TASK_STATUSES
+            )
+            # CRITICAL USER RULE: Strictly send email only if staff has active tasks in TODO, IN_PROGRESS, or CHANGES_REQUESTED!
+            # If user has 0 tasks in these statuses (or only closed / pending GM review tasks), SKIP completely - do NOT send mail!
             if not active_tasks.exists():
                 continue
             urgent_or_due = active_tasks.filter(
@@ -2272,7 +2309,9 @@ def dispatch_urgent_and_due_date_reminders(user=None, force=False):
     today = now_ist.date()
     tomorrow = today + timezone.timedelta(days=1)
 
-    tasks_qs = Task.objects.exclude(status=Task.STATUS_CLOSED).filter(
+    tasks_qs = Task.objects.filter(
+        status__in=[Task.STATUS_TODO, Task.STATUS_IN_PROGRESS, Task.STATUS_CHANGES_REQUESTED]
+    ).filter(
         Q(priority=Task.PRIORITY_URGENT) |
         Q(due_date__isnull=False, due_date__lte=tomorrow)
     ).select_related('assigned_to', 'department', 'created_by')
