@@ -40,7 +40,9 @@ from .services import (
     push_message_to_assigned_staff, save_task_attachment_image,
     parse_attachments_list, serialize_attachments_list,
     send_expo_push_notification, record_user_login, record_user_logout,
-    sync_email_credentials
+    sync_email_credentials,
+    notify_meeting_scheduled, notify_meeting_reminder,
+    parse_task_meeting_data, build_google_calendar_url
 )
 
 
@@ -632,6 +634,26 @@ class TaskViewSet(viewsets.ModelViewSet):
         return Response({
             'status': 'success',
             'message': f"Task assignment email sent to {task.assigned_to.get_full_name() or task.assigned_to.username} ({task.assigned_to.email})."
+        })
+
+    @action(detail=True, methods=['post'], url_path='send-meeting-reminder')
+    def send_meeting_reminder(self, request, pk=None):
+        """
+        Dispatches an instant meeting reminder (Email + In-App Push) with Google Meet link
+        and Google Calendar shortcut to all meeting attendees.
+        """
+        task = self.get_object()
+        dispatched_count = notify_meeting_reminder(task, sender=request.user)
+        log_activity(
+            request.user,
+            "SENT_MEETING_REMINDER",
+            f"Dispatched meeting reminder for '{task.title}' to {dispatched_count} attendee(s)",
+            task=task
+        )
+        return Response({
+            'status': 'success',
+            'dispatched_count': dispatched_count,
+            'message': f"Meeting reminder successfully dispatched to {dispatched_count} attendee(s)."
         })
 
     @action(detail=True, methods=['post'], url_path='push-message')

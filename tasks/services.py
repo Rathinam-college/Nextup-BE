@@ -1071,6 +1071,12 @@ def notify_task_assigned(task, assigned_by):
     if is_gm_own_task(task):
         return
 
+    # If this is a meeting, dispatch the dedicated Meeting Invitation with Google Meet & Google Calendar
+    meeting_meta = parse_task_meeting_data(task)
+    if meeting_meta.get('is_meeting'):
+        notify_meeting_scheduled(task, assigned_by)
+        return
+
     # Strictly notify only the assigned person and explicitly co-assigned team members
     recipients = get_task_target_recipients(task)
     if not recipients and task.assigned_to and task.assigned_to.is_active:
@@ -2482,3 +2488,295 @@ def dispatch_urgent_and_due_date_reminders(user=None, force=False):
         'count': dispatched,
         'tasks': items,
     }
+
+
+# ==============================================================================
+# GOOGLE CALENDAR & MEETING INTEGRATION SERVICES
+# ==============================================================================
+
+def parse_task_meeting_data(task_or_desc):
+    """
+    Parses meeting metadata embedded in task description or checks [MEETING] tag.
+    Returns a dict with meeting attributes:
+      - is_meeting: bool
+      - meeting_time: str (ISO)
+      - meeting_end_time: str (ISO)
+      - meeting_link: str (Google Meet / Zoom URL)
+      - location: str
+      - attendees: list of { id, name, email }
+    """
+    desc = ""
+    title = ""
+    if hasattr(task_or_desc, 'description'):
+        desc = task_or_desc.description or ""
+        title = task_or_desc.title or ""
+    elif isinstance(task_or_desc, str):
+        desc = task_or_desc
+    elif isinstance(task_or_desc, dict):
+        desc = task_or_desc.get('description', '')
+        title = task_or_desc.get('title', '')
+
+    data = {
+        'is_meeting': False,
+        'meeting_time': '',
+        'meeting_end_time': '',
+        'meeting_link': '',
+        'location': 'Google Meet',
+        'attendees': [],
+    }
+
+    match = re.search(r'<!-- MEETING_DATA:(.*?) -->', desc)
+    if match and match.group(1):
+        try:
+            parsed = json.loads(match.group(1))
+            if isinstance(parsed, dict):
+                data['is_meeting'] = True
+                data['meeting_time'] = parsed.get('meetingTime') or parsed.get('meeting_time') or ''
+                data['meeting_end_time'] = parsed.get('meetingEndTime') or parsed.get('meeting_end_time') or ''
+                data['meeting_link'] = parsed.get('meetingLink') or parsed.get('meeting_link') or ''
+                data['location'] = parsed.get('location') or 'Google Meet'
+                data['attendees'] = parsed.get('attendees') or []
+        except Exception:
+            pass
+
+    if not data['is_meeting'] and ('[MEETING]' in title.upper() or 'MEETING:' in title.upper()):
+        data['is_meeting'] = True
+
+    return data
+
+
+def build_google_calendar_url(title, start_iso, end_iso=None, description="", location="", attendees=None):
+    """
+    Constructs a one-click Google Calendar Event URL with pre-filled details,
+    dates, Google Meet link location, and attendee invites.
+    """
+    import urllib.parse
+    from datetime import datetime, timedelta
+
+    # Standard clean title
+    clean_title = re.sub(r'\[MEETING\]\s*', '', title, flags=re.I).strip()
+    event_title = f"Meeting: {clean_title}" if clean_title else "Scheduled Meeting"
+
+    def _to_cal_dt(val):
+        if not val:
+            return None
+        val_str = str(val).strip().replace('Z', '')
+        for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+            try:
+                return datetime.strptime(val_str[:19], fmt)
+            except Exception:
+                continue
+        return None
+
+    start_dt = _to_cal_dt(start_iso)
+    if not start_dt:
+        start_dt = datetime.now() + timedelta(hours=1)
+
+    end_dt = _to_cal_dt(end_iso)
+    if not end_dt or end_dt <= start_dt:
+        end_dt = start_dt + timedelta(minutes=45)
+
+    dates_str = f"{start_dt.strftime('%Y%m%dT%H%M%S')}/{end_dt.strftime('%Y%m%dT%H%M%S')}"
+
+    clean_desc = re.sub(r'<!--.*?-->', '', description or '').strip()
+    details_text = f"{clean_desc}\n\nManaged via NextUp • Rathinam Group: https://www.rguedu.in/nextup/"
+
+    params = {
+        'action': 'TEMPLATE',
+        'text': event_title,
+        'dates': dates_str,
+        'details': details_text,
+        'location': location or 'Google Meet',
+    }
+
+    if attendees:
+        clean_emails = [a.strip() for a in attendees if a and '@' in a]
+        if clean_emails:
+            params['add'] = ','.join(clean_emails)
+
+    return f"https://calendar.google.com/calendar/render?{urllib.parse.urlencode(params)}"
+
+
+def notify_meeting_scheduled(task, organizer=None, force=True):
+    """
+    Sends meeting invitation emails and in-app notifications with Google Meet link
+    and one-click "Add to Google Calendar" button to all meeting attendees.
+    """
+    meeting_data = parse_task_meeting_data(task)
+    recipients = get_task_target_recipients(task)
+    if not recipients and task.assigned_to and task.assigned_to.is_active:
+        recipients = {task.assigned_to}
+
+    if not recipients:
+        return 0
+
+    organizer_name = (organizer.get_full_name() or organizer.username) if organizer else "Management"
+    clean_title = re.sub(r'\[MEETING\]\s*', '', task.title, flags=re.I).strip()
+    subject = f"📅 Meeting Invitation: {clean_title}"
+
+    raw_desc = (task.description or "").strip()
+    clean_desc = re.sub(r'<!--.*?-->', '', raw_desc).strip()
+    if not clean_desc:
+        clean_desc = "Agenda and meeting items will be discussed as scheduled."
+
+    time_display = meeting_data.get('meeting_time') or (str(task.due_date) if task.due_date else "As Scheduled")
+    location_display = meeting_data.get('location') or 'Google Meet'
+    meet_link = meeting_data.get('meeting_link') or ''
+
+    attendee_emails = [r.email for r in recipients if r.email and '@' in r.email]
+    gcal_url = build_google_calendar_url(
+        title=task.title,
+        start_iso=meeting_data.get('meeting_time') or str(task.due_date or ''),
+        end_iso=meeting_data.get('meeting_end_time'),
+        description=clean_desc,
+        location=meet_link or location_display,
+        attendees=attendee_emails
+    )
+
+    dispatched = 0
+    for rec in recipients:
+        rec_name = rec.get_full_name() or rec.username
+
+        body = (
+            f"Hello {rec_name},\n\n"
+            f"You are invited to the upcoming meeting: '{clean_title}' organized by {organizer_name}.\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📅 MEETING DETAILS:\n"
+            f"• Title: {clean_title}\n"
+            f"• Date & Time: {time_display}\n"
+            f"• Location / Video: {location_display}\n"
+            f"{f'• Google Meet URL: {meet_link}' if meet_link else ''}\n"
+            f"• Organizer: {organizer_name}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Agenda:\n{clean_desc}\n\n"
+            f"🗓️ Add to Google Calendar: {gcal_url}\n"
+            f"{f'📹 Join Google Meet: {meet_link}' if meet_link else ''}\n\n"
+            f"Best regards,\nNextUp • Rathinam Group of Institutions"
+        )
+
+        details_dict = [
+            ("Meeting Title", clean_title),
+            ("Date & Time", time_display),
+            ("Location / Video", location_display),
+            ("Organizer", organizer_name),
+        ]
+        if meet_link:
+            details_dict.append(("Google Meet", meet_link))
+
+        html_body = build_branded_html_email(
+            title=subject,
+            recipient_name=rec_name,
+            badge_text="📅 MEETING INVITATION",
+            badge_variant="primary",
+            headline=f"Meeting: {clean_title}",
+            intro_lines=[
+                f"You are invited to attend <strong>'{html.escape(clean_title)}'</strong> organized by <strong>{html.escape(organizer_name)}</strong>."
+            ],
+            details_dict=details_dict,
+            description_text=clean_desc,
+            action_url=meet_link if meet_link else gcal_url,
+            action_text="Join Google Meet" if meet_link else "Add to Google Calendar",
+            closing_text=f'<p style="margin-top:14px;"><a href="{gcal_url}" target="_blank" style="display:inline-block;padding:9px 18px;background:#4f46e5;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;font-size:12.5px;">🗓️ Add to Google Calendar</a></p>'
+        )
+
+        try:
+            dispatch_email_and_notification(
+                recipient=rec,
+                subject=subject,
+                body=body,
+                event_type='MEETING_INVITATION',
+                task=task,
+                title=f"📅 Meeting Invitation: {clean_title}",
+                html_body=html_body,
+                force=True  # Direct meeting invitations are always sent
+            )
+            dispatched += 1
+        except Exception as e:
+            print(f"[MeetingNotice] Error sending invitation to {rec}: {e}")
+
+    return dispatched
+
+
+def notify_meeting_reminder(task, sender=None, force=True):
+    """
+    Sends an immediate meeting reminder alert (Email + In-App Push) to all attendees.
+    """
+    meeting_data = parse_task_meeting_data(task)
+    recipients = get_task_target_recipients(task)
+    if not recipients and task.assigned_to and task.assigned_to.is_active:
+        recipients = {task.assigned_to}
+
+    if not recipients:
+        return 0
+
+    clean_title = re.sub(r'\[MEETING\]\s*', '', task.title, flags=re.I).strip()
+    subject = f"⏰ Reminder: Meeting '{clean_title}' Starting Soon"
+    sender_name = (sender.get_full_name() or sender.username) if sender else "Management"
+
+    time_display = meeting_data.get('meeting_time') or (str(task.due_date) if task.due_date else "Today")
+    location_display = meeting_data.get('location') or 'Google Meet'
+    meet_link = meeting_data.get('meeting_link') or ''
+
+    attendee_emails = [r.email for r in recipients if r.email and '@' in r.email]
+    gcal_url = build_google_calendar_url(
+        title=task.title,
+        start_iso=meeting_data.get('meeting_time') or str(task.due_date or ''),
+        end_iso=meeting_data.get('meeting_end_time'),
+        description=(task.description or '').strip(),
+        location=meet_link or location_display,
+        attendees=attendee_emails
+    )
+
+    dispatched = 0
+    for rec in recipients:
+        rec_name = rec.get_full_name() or rec.username
+        body = (
+            f"Hello {rec_name},\n\n"
+            f"This is a reminder that meeting '{clean_title}' is scheduled for {time_display}.\n\n"
+            f"📍 Location / Mode: {location_display}\n"
+            f"{f'📹 Google Meet Link: {meet_link}' if meet_link else ''}\n\n"
+            f"Please be ready to join on time.\n\n"
+            f"Best regards,\nNextUp • Rathinam Group of Institutions"
+        )
+
+        details_dict = [
+            ("Meeting", clean_title),
+            ("Time", time_display),
+            ("Location", location_display),
+        ]
+        if meet_link:
+            details_dict.append(("Google Meet", meet_link))
+
+        html_body = build_branded_html_email(
+            title=subject,
+            recipient_name=rec_name,
+            badge_text="⏰ MEETING REMINDER",
+            badge_variant="warning",
+            headline=f"Starting Soon: {clean_title}",
+            intro_lines=[
+                f"Reminder from <strong>{html.escape(sender_name)}</strong>: Your scheduled meeting is starting soon."
+            ],
+            details_dict=details_dict,
+            description_text=(task.description or '').strip()[:300],
+            action_url=meet_link if meet_link else "https://www.rguedu.in/nextup/",
+            action_text="Join Google Meet Now" if meet_link else "Open NextUp Portal",
+            closing_text=f'<p style="margin-top:14px;"><a href="{gcal_url}" target="_blank" style="display:inline-block;padding:9px 18px;background:#4f46e5;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;font-size:12.5px;">🗓️ Open in Google Calendar</a></p>'
+        )
+
+        try:
+            dispatch_email_and_notification(
+                recipient=rec,
+                subject=subject,
+                body=body,
+                event_type='MEETING_REMINDER',
+                task=task,
+                title=f"⏰ Meeting Reminder: {clean_title}",
+                html_body=html_body,
+                force=True
+            )
+            dispatched += 1
+        except Exception as e:
+            print(f"[MeetingReminder] Error sending reminder to {rec}: {e}")
+
+    return dispatched
+

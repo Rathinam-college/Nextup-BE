@@ -31,6 +31,7 @@ def start_india_work_hours_scheduler():
 
         last_dispatched_9am_date = None
         last_dispatched_6pm_date = None
+        reminded_meeting_ids = set()
 
         while True:
             try:
@@ -39,7 +40,12 @@ def start_india_work_hours_scheduler():
                     is_sunday_holiday,
                     dispatch_morning_9am_work_email,
                     dispatch_evening_6pm_work_email,
+                    parse_task_meeting_data,
+                    notify_meeting_reminder,
                 )
+                from .models import Task
+                from datetime import datetime, timedelta
+
                 now_ist = get_india_current_time()
                 today_date = now_ist.date()
                 current_hour = now_ist.hour
@@ -49,7 +55,41 @@ def start_india_work_hours_scheduler():
                     time.sleep(60)
                     continue
 
-                # 1) Morning 9:00 AM Kick-Off (Fires once per day at 9:00 AM IST)
+                # 1) Automated Meeting Reminders: Check for meetings starting within 20 minutes
+                try:
+                    active_meetings = Task.objects.filter(
+                        status__in=[Task.STATUS_TODO, Task.STATUS_IN_PROGRESS]
+                    ).filter(
+                        description__icontains='MEETING_DATA'
+                    )
+                    for m_task in active_meetings:
+                        if m_task.id in reminded_meeting_ids:
+                            continue
+                        m_meta = parse_task_meeting_data(m_task)
+                        m_time_str = m_meta.get('meeting_time')
+                        if not m_time_str:
+                            continue
+                        # Parse meeting time
+                        m_dt = None
+                        for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M'):
+                            try:
+                                m_dt = datetime.strptime(m_time_str[:19], fmt)
+                                break
+                            except Exception:
+                                continue
+                        if m_dt:
+                            # If timezone-naive, make comparable to now_ist
+                            now_naive = now_ist.replace(tzinfo=None)
+                            diff_sec = (m_dt - now_naive).total_seconds()
+                            # If meeting starts in 0 to 20 minutes
+                            if 0 <= diff_sec <= 20 * 60:
+                                print(f"[WorkSchedule] ⏰ Triggering 15-minute advance reminder for meeting: '{m_task.title}'")
+                                notify_meeting_reminder(m_task)
+                                reminded_meeting_ids.add(m_task.id)
+                except Exception as meet_err:
+                    print(f"[WorkSchedule] Meeting reminder check notice: {meet_err}")
+
+                # 2) Morning 9:00 AM Kick-Off (Fires once per day at 9:00 AM IST)
                 if current_hour == 9 and last_dispatched_9am_date != today_date:
                     print(f"[WorkSchedule] ☀️ 9:00 AM IST ({now_ist.strftime('%A')}): Dispatching Morning Work Start emails...")
                     count = dispatch_morning_9am_work_email()
