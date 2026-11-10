@@ -327,7 +327,7 @@ class RoutineWorkLogSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = RoutineWorkLog
-        fields = ['id', 'item', 'completed_by', 'completed_by_name', 'completed_at', 'period_identifier', 'notes', 'status']
+        fields = ['id', 'item', 'completed_by', 'completed_by_name', 'completed_at', 'period_identifier', 'count', 'notes', 'status']
         read_only_fields = ['completed_at']
 
     def get_completed_by_name(self, obj):
@@ -348,6 +348,7 @@ class RoutineWorkItemSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'description', 'frequency', 'department', 'department_name', 'department_code',
             'assigned_to', 'assigned_to_name', 'created_by', 'created_by_name', 'priority', 'target_time',
+            'target_count', 'unit', 'last_completed_count',
             'is_active', 'last_completed_at', 'last_completed_by', 'last_completed_by_name',
             'completion_notes', 'created_at', 'updated_at'
         ]

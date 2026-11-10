@@ -2389,20 +2389,44 @@ class RoutineWorkItemViewSet(viewsets.ModelViewSet):
         item = self.get_object()
         period = request.data.get('period_identifier')
         notes = request.data.get('notes', '')
+        raw_count = request.data.get('count')
+        update_existing = request.data.get('update_existing', False)
+
+        try:
+            count = int(raw_count) if raw_count is not None and str(raw_count).strip() != '' else 1
+        except (ValueError, TypeError):
+            count = 1
 
         if not period:
             return Response({'detail': 'period_identifier is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         existing_log = RoutineWorkLog.objects.filter(item=item, period_identifier=period).first()
-        if existing_log:
+        if existing_log and not update_existing:
             # Uncheck
             existing_log.delete()
             item.last_completed_at = None
             item.last_completed_by = None
-            item.save(update_fields=['last_completed_at', 'last_completed_by'])
+            item.last_completed_count = 0
+            item.save(update_fields=['last_completed_at', 'last_completed_by', 'last_completed_count'])
             return Response({'completed': False, 'period_identifier': period})
+        elif existing_log and update_existing:
+            # Update existing log
+            existing_log.count = count
+            if notes:
+                existing_log.notes = notes
+            existing_log.save(update_fields=['count', 'notes'])
+            item.last_completed_count = count
+            item.save(update_fields=['last_completed_count'])
+            return Response({
+                'completed': True,
+                'period_identifier': period,
+                'completed_by_name': existing_log.completed_by.get_full_name() or existing_log.completed_by.username if existing_log.completed_by else user.username,
+                'completed_at': existing_log.completed_at.isoformat(),
+                'count': count,
+                'notes': existing_log.notes
+            })
         else:
-            # Check
+            # Check / Create new log
             now = timezone.now()
             log = RoutineWorkLog.objects.create(
                 item=item,
@@ -2410,16 +2434,20 @@ class RoutineWorkItemViewSet(viewsets.ModelViewSet):
                 completed_at=now,
                 period_identifier=period,
                 notes=notes,
+                count=count,
                 status='COMPLETED'
             )
             item.last_completed_at = now
             item.last_completed_by = user
-            item.save(update_fields=['last_completed_at', 'last_completed_by'])
+            item.last_completed_count = count
+            item.save(update_fields=['last_completed_at', 'last_completed_by', 'last_completed_count'])
             return Response({
                 'completed': True,
                 'period_identifier': period,
                 'completed_by_name': user.get_full_name() or user.username,
-                'completed_at': now.isoformat()
+                'completed_at': now.isoformat(),
+                'count': count,
+                'notes': notes
             })
 
 

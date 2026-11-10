@@ -341,6 +341,9 @@ class RoutineWorkItem(models.Model):
 
     last_completed_at = models.DateTimeField(null=True, blank=True)
     last_completed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='completed_routine_items')
+    last_completed_count = models.IntegerField(default=0, null=True, blank=True)
+    target_count = models.IntegerField(default=0, null=True, blank=True)
+    unit = models.CharField(max_length=50, blank=True, default='')
     completion_notes = models.TextField(blank=True, default='')
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -359,6 +362,7 @@ class RoutineWorkLog(models.Model):
     completed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='routine_logs')
     completed_at = models.DateTimeField(auto_now_add=True)
     period_identifier = models.CharField(max_length=50, db_index=True)
+    count = models.IntegerField(default=1, null=True, blank=True)
     notes = models.TextField(blank=True, default='')
     status = models.CharField(max_length=20, default='COMPLETED')
 
