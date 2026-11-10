@@ -874,8 +874,12 @@ def dispatch_email_and_notification(recipient, subject, body, event_type, task=N
     is_sunday = is_sunday_holiday()
     should_send_email = force or (not is_sunday)
 
-    # CRITICAL 0-TASK RULE: For hourly work reminders, strictly block email if user has 0 active tasks!
-    if should_send_email and event_type == 'HOURLY_WORK_REMINDER':
+    # CRITICAL 0-TASK RULE: For scheduled work reminders (9 AM start, 6 PM wrap-up, and routine reminders),
+    # strictly block email if user has 0 active tasks!
+    if should_send_email and event_type in (
+        'HOURLY_WORK_REMINDER', 'DAILY_9AM_REMINDER', 'DAILY_6PM_WRAPUP',
+        'WORK_DAY_START', 'WORK_DAY_WRAPUP', 'MORNING_REMINDER', 'EVENING_REMINDER'
+    ):
         has_active = Task.objects.filter(
             Q(assigned_to=recipient) |
             Q(description__icontains=f'"assignedToId": {recipient.id}') |
@@ -2132,24 +2136,18 @@ def push_message_to_assigned_staff(task, sender_user, message_text, send_email=T
     }
 
 
-def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False, force=False):
+def dispatch_morning_9am_work_email(user=None, force=False):
     """
-    Dispatches 1-hour recurring work check-in reminder during India working hours:
-    Monday to Saturday, 9:00 AM to 6:00 PM IST.
-    Sunday is an official weekly holiday: automated emails and notifications are silenced!
-    If user has urgent or due date tasks, the push notification explicitly highlights them with all details!
+    Dispatches the official Morning 9:00 AM Work Day Kick-Off email & notification
+    to staff with active deliverables (status: TODO, IN_PROGRESS, CHANGES_REQUESTED).
+    Operating Window: Monday to Saturday at 9:00 AM IST.
+    Sunday Holiday: Strictly silenced.
+    Zero-Task Rule: Strictly skips any staff member with 0 active tasks (NO emails).
     """
     now_ist = get_india_current_time()
 
-    # CRITICAL RULE: Sunday is a weekly holiday. Do not send automated check-in emails & notifications on Sunday!
     if not force and is_sunday_holiday(now_ist):
-        print(f"[HourlyReminder] 🏖️ Today is Sunday (Weekly Holiday). Staff check-in notifications and emails are silenced.")
-        return 0
-
-    if enforce_work_hours and not force and not is_within_india_work_hours(now_ist):
-        day_str = now_ist.strftime('%A')
-        time_str = now_ist.strftime('%I:%M %p')
-        print(f"[HourlyReminder] Outside working window ({day_str} {time_str} IST). Active schedule: Monday to Saturday, 9:00 AM – 6:00 PM IST (Sunday Holiday).")
+        print(f"[Morning9AM] 🏖️ Sunday Holiday: Morning briefings are silenced.")
         return 0
 
     if user:
@@ -2158,9 +2156,8 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False, force=Fa
         recipients = list(User.objects.filter(is_active=True))
 
     today = now_ist.date()
-    count = 0
-    now_str = now_ist.strftime('%I:%M %p')
     day_name = now_ist.strftime('%A')
+    count = 0
 
     ACTIVE_STAFF_TASK_STATUSES = [Task.STATUS_TODO, Task.STATUS_IN_PROGRESS, Task.STATUS_CHANGES_REQUESTED]
 
@@ -2173,138 +2170,211 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False, force=Fa
                 Q(description__icontains=f'"staffId": {r.id}') |
                 Q(description__icontains=f'"staffId":{r.id}'),
                 status__in=ACTIVE_STAFF_TASK_STATUSES
-            )
-            # CRITICAL USER RULE: Strictly send email only if staff has active tasks in TODO, IN_PROGRESS, or CHANGES_REQUESTED!
-            # If user has 0 tasks in these statuses (or only closed / pending GM review tasks), SKIP completely - do NOT send mail!
-            if not active_tasks.exists():
+            ).order_by('due_date', '-priority')
+
+            active_count = active_tasks.count()
+            # STRICT 0-TASK RULE: Never send if user has 0 active tasks!
+            if active_count <= 0:
+                print(f"[Morning9AM] Staff {r.username} has 0 active tasks. Skipping morning email.")
                 continue
+
             urgent_or_due = active_tasks.filter(
                 Q(priority=Task.PRIORITY_URGENT) | Q(due_date__lte=today)
-            ).order_by('due_date')
-
+            )
             urgent_count = urgent_or_due.count()
-            if urgent_count > 0:
-                top_task = urgent_or_due.first()
-                if top_task.due_date and top_task.due_date < today:
-                    tag = f"OVERDUE by {(today - top_task.due_date).days}d"
-                elif top_task.due_date and top_task.due_date == today:
-                    tag = "DUE TODAY"
-                else:
-                    tag = "URGENT PRIORITY"
 
-                subject = f"🚨 [Mon–Sat 9AM–6PM Check-In] {urgent_count} Urgent / Due Deliverable(s)"
-                body = (
-                    f"Hello {r.get_full_name() or r.username},\n\n"
-                    f"This is your hourly work check-in ({now_str} IST • {day_name} • Monday to Saturday Work Hours).\n\n"
-                    f"⚠️ ATTENTION - PENDING URGENT DELIVERABLE:\n"
-                    f"• Task: #{top_task.id} '{top_task.title}'\n"
-                    f"• Department: {top_task.department.name} ({top_task.department.code})\n"
-                    f"• Priority: {top_task.get_priority_display()}\n"
-                    f"• Due Date: {top_task.due_date or 'Immediate'}\n"
-                    f"• Status Notice: {tag}\n\n"
-                    f"Total urgent / due tasks waiting: {urgent_count}.\n"
-                    f"Please review and submit your progress updates on NextUp."
-                )
-                html_body = build_branded_html_email(
-                    title=subject,
-                    recipient_name=r.get_full_name() or r.username,
-                    badge_text=f"🚨 {now_str} IST CHECK-IN • URGENT DELIVERABLE",
-                    badge_variant="urgent",
-                    headline=f"Urgent Deliverable Alert ({now_str} IST)",
-                    intro_lines=[
-                        f"This is your continuous 1-hour work check-in reminder during working hours (Monday to Saturday, 9:00 AM – 6:00 PM IST • Sunday Holiday).",
-                        f"<strong>⚠️ Attention:</strong> You have <strong>{urgent_count} urgent / pending deliverable(s)</strong> awaiting completion."
-                    ],
-                    details_dict=[
-                        ("Pending Task", f"#{top_task.id} {top_task.title}"),
-                        ("Department", f"{top_task.department.name} ({top_task.department.code})" if top_task.department else "General"),
-                        ("Priority", top_task.get_priority_display()),
-                        ("Target Due Date", f"{top_task.due_date or 'Immediate'} ({tag})"),
-                        ("Status Notice", tag),
-                        ("Working Schedule", "Monday – Saturday • 9:00 AM – 6:00 PM IST (Sunday Holiday)"),
-                        ("Total Urgent Tasks", str(urgent_count)),
-                    ],
-                    description_text=(top_task.description or "").strip(),
-                    action_url="https://www.rguedu.in/nextup/",
-                    action_text="Prioritize & Update Deliverable",
-                    closing_text="Please review and submit your progress updates on the NextUp portal."
-                )
-                event_type = 'HOURLY_WORK_REMINDER'
-                notif_title = f"🚨 [Urgent Task Due] #{top_task.id} {top_task.title}"
-                push_title = f"🚨 [{now_str} IST] {urgent_count} Urgent / Due Task(s)"
-                push_body = (
-                    f"⚠️ #{top_task.id} {top_task.title}\n"
-                    f"Priority: {top_task.get_priority_display()} • Due: {top_task.due_date or 'Immediate'} ({tag})\n"
-                    f"Dept: {top_task.department.code if top_task.department else 'General'} • Work Hours: Mon–Sat 9AM–6PM"
-                )
-                top_task_obj = top_task
-            else:
-                active_count = active_tasks.count()
-                # STRICT RULE: NEVER SEND MAIL IF 0 TASKS!
-                if active_count <= 0:
-                    print(f"[HourlyReminder] Staff member {r.username} has 0 tasks in TODO/IN_PROGRESS/CHANGES_REQUESTED. Skipping email & notification.")
-                    continue
+            top_task = active_tasks.first()
+            task_titles = [f"• #{t.id} {t.title} [{t.get_priority_display()} • Due: {t.due_date or 'Flexible'}]" for t in active_tasks[:5]]
+            tasks_list_str = "\n".join(task_titles)
+            if active_count > 5:
+                tasks_list_str += f"\n...and {active_count - 5} more active task(s)."
 
-                subject = f"⏰ Hourly Work Check-In ({now_str} IST • Mon–Sat)"
-                body = (
-                    f"Hello {r.get_full_name() or r.username},\n\n"
-                    f"This is your continuous 1-hour work check-in reminder (Monday to Saturday, 9:00 AM – 6:00 PM IST • Sunday Holiday).\n"
-                    f"Active deliverables: {active_count} task(s) in progress (To Do, In Progress, or Changes Requested).\n"
-                    f"Please keep your active tasks, progress reports, and deliverables current."
-                )
-                intro = [
-                    f"This is your continuous 1-hour work check-in reminder during working hours (Monday to Saturday, 9:00 AM – 6:00 PM IST • Sunday Holiday).",
-                    f"You currently have <strong>{active_count} active deliverable(s)</strong> in progress (To Do, In Progress, or Changes Requested). Please keep your active tasks, progress reports, and milestone updates current."
-                ]
+            subject = f"☀️ [9:00 AM Work Day Start] Today's Deliverables ({active_count} Active • {day_name})"
 
-                details_list = [
-                    ("Check-In Time", f"{now_str} IST ({day_name})"),
-                    ("Working Schedule", "Monday – Saturday • 9:00 AM – 6:00 PM IST (Sunday Holiday)"),
-                    ("Active Deliverables", f"{active_count} task{'s' if active_count != 1 else ''} in progress"),
-                ]
+            body = (
+                f"Hello {r.get_full_name() or r.username},\n\n"
+                f"Good morning! Your work day begins at 9:00 AM IST ({day_name} • Monday to Saturday Schedule).\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📋 YOUR ACTIVE TASKS FOR TODAY ({active_count} Total):\n"
+                f"{tasks_list_str}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Please review and start on your priority deliverables on the NextUp portal.\n\n"
+                f"Best regards,\nNextUp • Rathinam Group of Institutions"
+            )
 
-                html_body = build_branded_html_email(
-                    title=subject,
-                    recipient_name=r.get_full_name() or r.username,
-                    badge_text=f"⏰ HOURLY WORK CHECK-IN • {now_str} IST",
-                    badge_variant="purple",
-                    headline=f"Hourly Work Check-In ({now_str} IST)",
-                    intro_lines=intro,
-                    details_dict=details_list,
-                    action_url="https://www.rguedu.in/nextup/",
-                    action_text="Open NextUp Portal",
-                    closing_text="Please keep your active tasks, progress reports, and deliverables current on NextUp."
-                )
-                event_type = 'HOURLY_WORK_REMINDER'
-                notif_title = f"⏰ 1-Hour Work Check-In ({now_str} IST)"
-                push_title = notif_title
-                push_body = (
-                    f"1-Hour check-in (Mon–Sat, 9:00 AM – 6:00 PM IST • Sunday Holiday).\n"
-                    f"You have {active_count} active task(s) in progress. Please review and update deliverables on NextUp."
-                )
-                top_task_obj = None
+            details_dict = [
+                ("Start Time", "9:00 AM IST"),
+                ("Day", day_name),
+                ("Active Deliverables", f"{active_count} task(s) in progress"),
+                ("Urgent / Due Deliverables", f"{urgent_count} urgent deliverable(s)" if urgent_count > 0 else "Normal priority"),
+                ("Top Deliverable", f"#{top_task.id} {top_task.title}" if top_task else "None"),
+                ("Working Schedule", "Monday – Saturday • 9:00 AM – 6:00 PM IST (Sunday Holiday)"),
+            ]
+
+            html_body = build_branded_html_email(
+                title=subject,
+                recipient_name=r.get_full_name() or r.username,
+                badge_text="☀️ 9:00 AM WORK DAY START",
+                badge_variant="primary" if urgent_count == 0 else "urgent",
+                headline=f"Your Work Day Kick-Off (9:00 AM IST)",
+                intro_lines=[
+                    f"Good morning! Your work day begins at <strong>9:00 AM IST</strong> ({day_name}).",
+                    f"You have <strong>{active_count} active deliverable(s)</strong> awaiting action today (To Do, In Progress, or Changes Requested)."
+                ],
+                details_dict=details_dict,
+                description_text=f"Active tasks scheduled for today:\n{tasks_list_str}",
+                action_url="https://www.rguedu.in/nextup/",
+                action_text="Start Today's Tasks in NextUp",
+                closing_text="Have a productive work day! Please keep task milestones and progress updated."
+            )
 
             dispatch_email_and_notification(
                 recipient=r,
                 subject=subject,
                 body=body,
-                event_type=event_type,
-                task=top_task_obj,
-                title=notif_title,
-                push_title=push_title,
-                push_body=push_body,
+                event_type='DAILY_9AM_REMINDER',
+                task=top_task,
+                title=f"☀️ 9:00 AM Work Day Start ({active_count} Tasks)",
+                push_title=f"☀️ [9:00 AM Start] {active_count} Active Task(s)",
+                push_body=f"Good morning! You have {active_count} active task(s) to work on today. Tap to view your plan.",
                 html_body=html_body,
             )
             count += 1
         except Exception as e:
-            print(f"Error dispatching hourly reminder to {r}: {e}")
+            print(f"[Morning9AM] Error dispatching to {r}: {e}")
 
     return count
 
 
+def dispatch_evening_6pm_work_email(user=None, force=False):
+    """
+    Dispatches the official Evening 6:00 PM Work Day Wrap-Up email & notification
+    to staff with active deliverables (status: TODO, IN_PROGRESS, CHANGES_REQUESTED).
+    Operating Window: Monday to Saturday at 6:00 PM IST.
+    Sunday Holiday: Strictly silenced.
+    Zero-Task Rule: Strictly skips any staff member with 0 active tasks (NO emails).
+    """
+    now_ist = get_india_current_time()
+
+    if not force and is_sunday_holiday(now_ist):
+        print(f"[Evening6PM] 🏖️ Sunday Holiday: Evening wrap-ups are silenced.")
+        return 0
+
+    if user:
+        recipients = [user]
+    else:
+        recipients = list(User.objects.filter(is_active=True))
+
+    today = now_ist.date()
+    day_name = now_ist.strftime('%A')
+    count = 0
+
+    ACTIVE_STAFF_TASK_STATUSES = [Task.STATUS_TODO, Task.STATUS_IN_PROGRESS, Task.STATUS_CHANGES_REQUESTED]
+
+    for r in recipients:
+        try:
+            active_tasks = Task.objects.filter(
+                Q(assigned_to=r) |
+                Q(description__icontains=f'"assignedToId": {r.id}') |
+                Q(description__icontains=f'"assignedToId":{r.id}') |
+                Q(description__icontains=f'"staffId": {r.id}') |
+                Q(description__icontains=f'"staffId":{r.id}'),
+                status__in=ACTIVE_STAFF_TASK_STATUSES
+            ).order_by('due_date', '-priority')
+
+            active_count = active_tasks.count()
+            # STRICT 0-TASK RULE: Never send if user has 0 active tasks!
+            if active_count <= 0:
+                print(f"[Evening6PM] Staff {r.username} has 0 active tasks. Skipping 6:00 PM email.")
+                continue
+
+            top_task = active_tasks.first()
+            task_titles = [f"• #{t.id} {t.title} [{t.get_status_display()} • Due: {t.due_date or 'Flexible'}]" for t in active_tasks[:5]]
+            tasks_list_str = "\n".join(task_titles)
+            if active_count > 5:
+                tasks_list_str += f"\n...and {active_count - 5} more pending task(s)."
+
+            subject = f"🏁 [6:00 PM End of Day Wrap-Up] Daily Task Summary ({active_count} In Progress • {day_name})"
+
+            body = (
+                f"Hello {r.get_full_name() or r.username},\n\n"
+                f"The work day is concluding (6:00 PM IST • {day_name}).\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📋 END-OF-DAY STATUS SUMMARY ({active_count} Remaining):\n"
+                f"{tasks_list_str}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Please ensure your daily work updates, deliverable submissions, and progress notes are saved on NextUp before concluding.\n\n"
+                f"Best regards,\nNextUp • Rathinam Group of Institutions"
+            )
+
+            details_dict = [
+                ("Wrap-Up Time", "6:00 PM IST"),
+                ("Day", day_name),
+                ("Pending Deliverables", f"{active_count} task(s) remaining in progress"),
+                ("Working Schedule", "Monday – Saturday • 9:00 AM – 6:00 PM IST (Sunday Holiday)"),
+            ]
+
+            html_body = build_branded_html_email(
+                title=subject,
+                recipient_name=r.get_full_name() or r.username,
+                badge_text="🏁 6:00 PM END OF DAY WRAP-UP",
+                badge_variant="purple",
+                headline="End of Day Wrap-Up (6:00 PM IST)",
+                intro_lines=[
+                    f"The work day concludes at <strong>6:00 PM IST</strong> ({day_name}).",
+                    f"You have <strong>{active_count} pending deliverable(s)</strong> remaining in progress."
+                ],
+                details_dict=details_dict,
+                description_text=f"Remaining tasks in progress:\n{tasks_list_str}",
+                action_url="https://www.rguedu.in/nextup/",
+                action_text="Review & Update in NextUp",
+                closing_text="Work hours complete for today. Please ensure all progress notes and deliverables are recorded."
+            )
+
+            dispatch_email_and_notification(
+                recipient=r,
+                subject=subject,
+                body=body,
+                event_type='DAILY_6PM_WRAPUP',
+                task=top_task,
+                title=f"🏁 6:00 PM End of Day Wrap-Up ({active_count} Tasks)",
+                push_title=f"🏁 [6:00 PM Wrap-Up] {active_count} Pending Task(s)",
+                push_body=f"Work day complete (6:00 PM IST). Please review and submit your progress updates on NextUp.",
+                html_body=html_body,
+            )
+            count += 1
+        except Exception as e:
+            print(f"[Evening6PM] Error dispatching to {r}: {e}")
+
+    return count
+
+
+def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False, force=False):
+    """
+    Legacy dispatcher updated to respect the institutional policy:
+    1-hour recurring reminders are REMOVED.
+    Automated emails strictly fire twice per working day:
+      - 9:00 AM IST: Morning Work Start Briefing
+      - 6:00 PM IST: End of Day Wrap-Up
+    Between 10:00 AM and 5:00 PM, routine hourly emails are completely suppressed.
+    """
+    now_ist = get_india_current_time()
+    if not force and is_sunday_holiday(now_ist):
+        return 0
+
+    current_hour = now_ist.hour
+    if current_hour == 9 or (force and current_hour < 14):
+        return dispatch_morning_9am_work_email(user=user, force=force)
+    elif current_hour == 18 or (force and current_hour >= 14):
+        return dispatch_evening_6pm_work_email(user=user, force=force)
+    else:
+        print(f"[WorkSchedule] 1-hour reminders are disabled. Routine emails only fire at 9:00 AM and 6:00 PM IST. Hour {current_hour}:00 skipped.")
+        return 0
+
+
 def dispatch_daily_9am_work_reminders(user=None, force=False):
-    """Backward-compatible alias for dispatch_hourly_work_reminders"""
-    return dispatch_hourly_work_reminders(user=user, force=force)
+    """Backward-compatible alias for dispatch_morning_9am_work_email"""
+    return dispatch_morning_9am_work_email(user=user, force=force)
 
 
 def dispatch_urgent_and_due_date_reminders(user=None, force=False):
