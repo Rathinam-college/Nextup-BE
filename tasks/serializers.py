@@ -324,10 +324,21 @@ class UserSessionLogSerializer(serializers.ModelSerializer):
 
 class RoutineWorkLogSerializer(serializers.ModelSerializer):
     completed_by_name = serializers.SerializerMethodField()
+    item_title = serializers.CharField(source='item.title', read_only=True, default='')
+    item_frequency = serializers.CharField(source='item.frequency', read_only=True, default='DAILY')
+    department_id = serializers.IntegerField(source='item.department.id', read_only=True, default=None, allow_null=True)
+    department_name = serializers.CharField(source='item.department.name', read_only=True, default='')
+    department_code = serializers.CharField(source='item.department.code', read_only=True, default='')
+    target_count = serializers.IntegerField(source='item.target_count', read_only=True, default=0)
+    unit = serializers.CharField(source='item.unit', read_only=True, default='')
 
     class Meta:
         model = RoutineWorkLog
-        fields = ['id', 'item', 'completed_by', 'completed_by_name', 'completed_at', 'period_identifier', 'count', 'notes', 'status']
+        fields = [
+            'id', 'item', 'item_title', 'item_frequency', 'department_id', 'department_name', 'department_code',
+            'target_count', 'unit', 'completed_by', 'completed_by_name', 'completed_at', 'period_identifier',
+            'count', 'notes', 'status'
+        ]
         read_only_fields = ['completed_at']
 
     def get_completed_by_name(self, obj):

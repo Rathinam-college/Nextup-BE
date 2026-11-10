@@ -31,3 +31,4 @@ class Migration(migrations.Migration):
             field=models.IntegerField(blank=True, default=1, null=True),
         ),
     ]
+
