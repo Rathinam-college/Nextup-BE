@@ -2267,8 +2267,8 @@ def get_app_version(request):
     return Response({
         "version": "2.4.6",
         "versionCode": 25,
-        "apkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
-        "fallbackApkUrl": "https://www.rguedu.in/nextup/NextUp.apk",
+        "apkUrl": "https://www.rguedu.in/nextup/NextUp.apk?v=25",
+        "fallbackApkUrl": "https://www.rguedu.in/nextup/NextUp.apk?v=25",
         "releaseNotes": [
             "Task Details Error Resolved: Fixed 'Rendered more hooks than during previous render' React hook error when opening tasks",
             "Persistent Update Synchronization: Clean build v2.4.6 (Build 25) prevents recurring update prompts",
