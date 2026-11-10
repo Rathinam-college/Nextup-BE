@@ -874,6 +874,20 @@ def dispatch_email_and_notification(recipient, subject, body, event_type, task=N
     is_sunday = is_sunday_holiday()
     should_send_email = force or (not is_sunday)
 
+    # CRITICAL 0-TASK RULE: For hourly work reminders, strictly block email if user has 0 active tasks!
+    if should_send_email and event_type == 'HOURLY_WORK_REMINDER':
+        has_active = Task.objects.filter(
+            Q(assigned_to=recipient) |
+            Q(description__icontains=f'"assignedToId": {recipient.id}') |
+            Q(description__icontains=f'"assignedToId":{recipient.id}') |
+            Q(description__icontains=f'"staffId": {recipient.id}') |
+            Q(description__icontains=f'"staffId":{recipient.id}'),
+            status__in=[Task.STATUS_TODO, Task.STATUS_IN_PROGRESS, Task.STATUS_CHANGES_REQUESTED]
+        ).exists()
+        if not has_active:
+            print(f"[EmailDispatch] 🛑 Blocked {event_type} to {recipient.email}: user has 0 active tasks (TODO, IN_PROGRESS, or CHANGES_REQUESTED).")
+            should_send_email = False
+
     email_log = None
     if should_send_email:
         # Non-blocking async dispatch: spawns background thread so HTTP worker immediately returns
@@ -2226,20 +2240,22 @@ def dispatch_hourly_work_reminders(user=None, enforce_work_hours=False, force=Fa
                 top_task_obj = top_task
             else:
                 active_count = active_tasks.count()
+                # STRICT RULE: NEVER SEND MAIL IF 0 TASKS!
+                if active_count <= 0:
+                    print(f"[HourlyReminder] Staff member {r.username} has 0 tasks in TODO/IN_PROGRESS/CHANGES_REQUESTED. Skipping email & notification.")
+                    continue
+
                 subject = f"⏰ Hourly Work Check-In ({now_str} IST • Mon–Sat)"
                 body = (
                     f"Hello {r.get_full_name() or r.username},\n\n"
                     f"This is your continuous 1-hour work check-in reminder (Monday to Saturday, 9:00 AM – 6:00 PM IST • Sunday Holiday).\n"
-                    f"Active deliverables: {active_count} tasks in progress.\n"
+                    f"Active deliverables: {active_count} task(s) in progress (To Do, In Progress, or Changes Requested).\n"
                     f"Please keep your active tasks, progress reports, and deliverables current."
                 )
                 intro = [
-                    f"This is your continuous 1-hour work check-in reminder during working hours (Monday to Saturday, 9:00 AM – 6:00 PM IST • Sunday Holiday)."
+                    f"This is your continuous 1-hour work check-in reminder during working hours (Monday to Saturday, 9:00 AM – 6:00 PM IST • Sunday Holiday).",
+                    f"You currently have <strong>{active_count} active deliverable(s)</strong> in progress (To Do, In Progress, or Changes Requested). Please keep your active tasks, progress reports, and milestone updates current."
                 ]
-                if active_count == 0:
-                    intro.append("You currently have <strong>0 active tasks in progress</strong>. You're all caught up! Keep up the momentum or review upcoming department deliverables on the portal.")
-                else:
-                    intro.append(f"You currently have <strong>{active_count} active deliverable(s)</strong> in progress. Please keep your active tasks, progress reports, and milestone updates current.")
 
                 details_list = [
                     ("Check-In Time", f"{now_str} IST ({day_name})"),

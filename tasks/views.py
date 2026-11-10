@@ -838,8 +838,11 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         force = request.data.get('force', False)
         count = dispatch_hourly_work_reminders(user=None if target_all else request.user, force=force)
         
-        if count == 0 and is_sunday_holiday() and not force:
-            message = "Today is Sunday (Weekly Holiday). Staff check-in notifications and emails are paused (Monday to Saturday only)."
+        if count == 0:
+            if is_sunday_holiday() and not force:
+                message = "Today is Sunday (Weekly Holiday). Staff check-in notifications and emails are paused (Monday to Saturday only)."
+            else:
+                message = "No reminder emails dispatched: user has 0 active tasks in To Do, In Progress, or Changes Requested."
         else:
             message = f"Continuous 1-hour work update reminder dispatched to {count} recipient(s)."
 
