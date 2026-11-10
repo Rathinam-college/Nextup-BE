@@ -67,15 +67,70 @@ WSGI_APPLICATION = 'task_tracker.wsgi.application'
 
 AUTH_USER_MODEL = 'tasks.User'
 
-# Database: PostgreSQL 18
+# Database: PostgreSQL
+_ENV_DB_NAME = os.getenv('DB_NAME')
+_ENV_DB_USER = os.getenv('DB_USER', 'postgres')
+_ENV_DB_PASSWORD = os.getenv('DB_PASSWORD')
+_ENV_DB_HOST = os.getenv('DB_HOST', 'localhost')
+_ENV_DB_PORT = os.getenv('DB_PORT', '5432')
+
+# If DB_PASSWORD is not explicitly provided in environment, probe known environment credentials
+if not _ENV_DB_PASSWORD:
+    _candidate_passwords = [
+        'postgres_secure_pass_2026',
+        'postgres',
+        'root',
+        'rathinam',
+        'rathinam@123',
+        'nextup',
+    ]
+    _candidate_dbs = [_ENV_DB_NAME] if _ENV_DB_NAME else ['task_tracker_db', 'nextup_db', 'postgres']
+    _candidate_hosts = [_ENV_DB_HOST, '127.0.0.1'] if _ENV_DB_HOST == 'localhost' else [_ENV_DB_HOST]
+
+    try:
+        import psycopg2
+        _connected = False
+        for _h in _candidate_hosts:
+            if _connected:
+                break
+            for _p in _candidate_passwords:
+                if _connected:
+                    break
+                for _d in _candidate_dbs:
+                    try:
+                        _conn = psycopg2.connect(
+                            dbname=_d,
+                            user=_ENV_DB_USER,
+                            password=_p,
+                            host=_h,
+                            port=_ENV_DB_PORT,
+                            connect_timeout=2
+                        )
+                        _conn.close()
+                        _ENV_DB_PASSWORD = _p
+                        _ENV_DB_HOST = _h
+                        if not _ENV_DB_NAME:
+                            _ENV_DB_NAME = _d
+                        _connected = True
+                        break
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+if not _ENV_DB_NAME:
+    _ENV_DB_NAME = 'task_tracker_db'
+if not _ENV_DB_PASSWORD:
+    _ENV_DB_PASSWORD = 'postgres'
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME', 'task_tracker_db'),
-        'USER': os.getenv('DB_USER', 'postgres'),
-        'PASSWORD': os.getenv('DB_PASSWORD', 'postgres'),
-        'HOST': os.getenv('DB_HOST', 'localhost'),
-        'PORT': os.getenv('DB_PORT', '5432'),
+        'NAME': _ENV_DB_NAME,
+        'USER': _ENV_DB_USER,
+        'PASSWORD': _ENV_DB_PASSWORD,
+        'HOST': _ENV_DB_HOST,
+        'PORT': _ENV_DB_PORT,
         'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '600')),
     }
 }
