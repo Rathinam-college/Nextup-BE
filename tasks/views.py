@@ -215,9 +215,10 @@ class TaskViewSet(viewsets.ModelViewSet):
                 Q(department__code__iexact='GM') |
                 Q(department__name__icontains='General Management')
             )
-            # Strictly isolate to only tasks where the user is directly assigned or explicitly co-assigned
+            # Strictly isolate to only tasks where the user is directly assigned, created, or explicitly co-assigned
             co_filter = (
                 Q(assigned_to=user) |
+                Q(created_by=user) |
                 Q(description__icontains=f'"assignedToId": {user.id}') |
                 Q(description__icontains=f'"assignedToId":{user.id}') |
                 Q(description__icontains=f'"staffId": {user.id}') |
