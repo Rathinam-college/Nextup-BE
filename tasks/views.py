@@ -255,8 +255,8 @@ class TaskViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         user = self.request.user
-        if not user.is_gm_or_super():
-            raise PermissionDenied("Permission denied: Only General Manager and Super Admin are permitted to create tasks.")
+        if not user or not user.is_authenticated:
+            raise PermissionDenied("Authentication required to create tasks.")
 
         dept = serializer.validated_data.get('department')
         assigned_to = serializer.validated_data.get('assigned_to')
@@ -269,6 +269,25 @@ class TaskViewSet(viewsets.ModelViewSet):
             is_gm_own = True
         else:
             is_gm_own = False
+
+        # Extract GM directive parameters (if task was shared by GM via email, phone, or in person)
+        desc = serializer.validated_data.get('description') or ''
+        gm_channel = self.request.data.get('gm_directive_channel') or self.request.data.get('assigned_by_gm_channel')
+        is_assigned_by_gm = self.request.data.get('assigned_by_gm')
+        directive_notes = self.request.data.get('gm_directive_notes', '')
+
+        if user.is_gm_or_super():
+            if not gm_channel and '<!-- GM_DIRECTIVE:' not in desc:
+                gm_channel = 'DIRECT'
+        elif is_assigned_by_gm or (gm_channel and gm_channel != 'NONE'):
+            if not gm_channel:
+                gm_channel = 'PHONE'
+
+        if gm_channel and gm_channel != 'NONE' and '<!-- GM_DIRECTIVE:' not in desc:
+            import json
+            meta = json.dumps({'channel': gm_channel, 'notes': directive_notes})
+            desc = f"<!-- GM_DIRECTIVE:{meta} -->\n" + desc
+            serializer.validated_data['description'] = desc
 
         # Handle attachment image/documents: save to media folder if uploaded
         new_saved_urls = []
@@ -309,6 +328,25 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         task = serializer.save(created_by=user, department=dept, is_gm_own_task=is_gm_own, attachment_image=saved_media_url)
 
+        # If created by staff under GM directive, notify General Managers
+        if not user.is_gm_or_super() and gm_channel and gm_channel != 'NONE':
+            channel_name = {
+                'PHONE': 'Phone Call', 'EMAIL': 'Email', 'IN_PERSON': 'In-Person / Verbal',
+                'MESSAGE': 'WhatsApp / Message', 'DIRECT': 'Direct GM Directive'
+            }.get(gm_channel, 'GM Directive')
+            gm_users = User.objects.filter(role__in=[User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN], is_active=True)
+            for gm in gm_users:
+                try:
+                    Notification.objects.create(
+                        recipient=gm,
+                        title="Task Logged under GM Directive",
+                        message=f"{user.get_full_name() or user.username} logged task '{task.title}' under GM Directive ({channel_name}) for {task.assigned_to.get_full_name() if task.assigned_to else 'Unassigned'}.",
+                        notification_type="GM_DIRECTIVE_TASK_CREATED",
+                        task=task
+                    )
+                except Exception as e:
+                    print(f"[perform_create] Warning creating GM notification: {e}")
+
         # Automatic email dispatch on task creation:
         # Immediately notify assigned staff member and all co-assigned team members
         if not task.is_gm_own_task:
@@ -327,8 +365,11 @@ class TaskViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         user = self.request.user
-        if not user.is_gm_or_super():
-            raise PermissionDenied("Permission denied: Only General Manager and Super Admin are permitted to edit task details.")
+        task = self.get_object()
+
+        # Allow GM, Super Admin, task creator, or assigned staff to edit details
+        if not (user.is_gm_or_super() or task.created_by == user or task.assigned_to == user):
+            raise PermissionDenied("Permission denied: You do not have permission to edit this task.")
 
         task = self.get_object()
         old_status = task.status

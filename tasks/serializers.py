@@ -105,11 +105,15 @@ class TaskSerializer(serializers.ModelSerializer):
     department_code = serializers.CharField(source='department.code', read_only=True)
     assigned_to_name = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
+    created_by_role = serializers.CharField(source='created_by.role', read_only=True)
     verified_by_name = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     assigned_to_email = serializers.SerializerMethodField()
     assigned_to_phone = serializers.SerializerMethodField()
+    assigned_by_gm = serializers.SerializerMethodField()
+    gm_directive_channel = serializers.SerializerMethodField()
+    gm_directive_channel_display = serializers.SerializerMethodField()
     comments = TaskCommentSerializer(many=True, read_only=True)
 
     attachment_image = serializers.CharField(required=False, allow_blank=True, allow_null=True, default='')
@@ -120,13 +124,14 @@ class TaskSerializer(serializers.ModelSerializer):
         model = Task
         fields = [
             'id', 'title', 'description', 'department', 'department_name', 'department_code',
-            'assigned_to', 'assigned_to_name', 'assigned_to_email', 'assigned_to_phone', 'created_by', 'created_by_name',
+            'assigned_to', 'assigned_to_name', 'assigned_to_email', 'assigned_to_phone', 'created_by', 'created_by_name', 'created_by_role',
+            'assigned_by_gm', 'gm_directive_channel', 'gm_directive_channel_display',
             'priority', 'priority_display', 'status', 'status_display', 'due_date',
             'gm_feedback_notes', 'verified_by', 'verified_by_name', 'closed_at',
             'attachment_image', 'image', 'attachments', 'is_gm_own_task',
             'created_at', 'updated_at', 'comments'
         ]
-        read_only_fields = ['created_by', 'verified_by', 'closed_at', 'created_at', 'updated_at']
+        read_only_fields = ['created_by', 'verified_by', 'closed_at', 'created_at', 'updated_at', 'assigned_by_gm', 'gm_directive_channel', 'gm_directive_channel_display']
 
     def get_assigned_to_phone(self, obj):
         return obj.assigned_to.phone if obj.assigned_to else ""
@@ -143,18 +148,53 @@ class TaskSerializer(serializers.ModelSerializer):
     def get_verified_by_name(self, obj):
         return obj.verified_by.get_full_name() or obj.verified_by.username if obj.verified_by else ""
 
+    def get_assigned_by_gm(self, obj):
+        if obj.created_by and obj.created_by.role in [User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN]:
+            return True
+        desc = obj.description or ''
+        return '<!-- GM_DIRECTIVE:' in desc
+
+    def get_gm_directive_channel(self, obj):
+        desc = obj.description or ''
+        import re, json
+        m = re.search(r'<!-- GM_DIRECTIVE:(.*?) -->', desc)
+        if m:
+            val = m.group(1).strip()
+            if val.startswith('{'):
+                try:
+                    return json.loads(val).get('channel', 'DIRECT')
+                except Exception:
+                    return 'DIRECT'
+            return val
+        if obj.created_by and obj.created_by.role in [User.ROLE_GENERAL_MANAGER, User.ROLE_SUPER_ADMIN]:
+            return 'DIRECT'
+        return 'NONE'
+
+    def get_gm_directive_channel_display(self, obj):
+        channel = self.get_gm_directive_channel(obj)
+        mapping = {
+            'PHONE': 'Phone Call',
+            'EMAIL': 'Email',
+            'IN_PERSON': 'In-Person / Verbal',
+            'MESSAGE': 'WhatsApp / Message',
+            'DIRECT': 'Direct GM Directive',
+            'NONE': 'Internal / Self'
+        }
+        return mapping.get(channel, channel)
+
     def validate(self, attrs):
         request = self.context.get('request')
         current_user = request.user if request else None
 
-        # Restrict Task creation and updates to General Manager and Super Admin only
+        # Allow all authenticated users to create tasks (including staff logging GM-assigned tasks)
         if request and request.method == 'POST':
-            if not current_user or not current_user.is_gm_or_super():
-                raise serializers.ValidationError({"detail": "Permission denied: Only General Manager and Super Admin are permitted to create tasks."})
+            if not current_user or not current_user.is_authenticated:
+                raise serializers.ValidationError({"detail": "Authentication required to create tasks."})
 
+        # Allow GM, Super Admin, task creator, or assigned staff to edit details
         if request and request.method in ['PUT', 'PATCH']:
-            if not current_user or not current_user.is_gm_or_super():
-                raise serializers.ValidationError({"detail": "Permission denied: Only General Manager and Super Admin are permitted to edit task details."})
+            if not current_user or not current_user.is_authenticated:
+                raise serializers.ValidationError({"detail": "Authentication required to edit task details."})
 
         # Exclusive GM Closure Check
         requested_status = attrs.get('status')
