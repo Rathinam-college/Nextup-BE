@@ -802,38 +802,90 @@ class TaskViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='export-csv')
     def export_csv(self, request):
         user = request.user
-        if user.is_staff_member():
-            raise PermissionDenied("Staff members do not have export permissions.")
-
         tasks = self.get_queryset()
 
         response = HttpResponse(content_type='text/csv; charset=utf-8')
-        response['Content-Disposition'] = f'attachment; filename="tasks_export_{timezone.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+        response['Content-Disposition'] = f'attachment; filename="NextUp_Tasks_Export_{timezone.now().strftime("%Y%m%d_%H%M%S")}.csv"'
 
         # UTF-8 BOM for Excel compatibility
         response.write('\ufeff'.encode('utf8'))
         writer = csv.writer(response)
         writer.writerow([
-            'ID', 'Title', 'Department', 'Department Code', 'Assignee',
-            'Creator', 'Priority', 'Status', 'Due Date', 'Verified By',
-            'Closed At', 'GM Feedback Notes', 'Created At'
+            'Task ID', 'Task Title', 'Department', 'Department Code',
+            'Directive Origin', 'Directive Notes',
+            'Assigned To', 'Assignee Email', 'Co-Assigned Team',
+            'Created By', 'Creator Role', 'Priority', 'Status',
+            'Due Date', 'Created At', 'Closed At',
+            'Verified By', 'Task Description & Deliverables', 'GM Feedback Notes'
         ])
 
+        import re
+        import json
+
+        def _parse_directive(desc):
+            if not desc:
+                return 'Internal / Direct', ''
+            m = re.search(r'<!--\s*GM_DIRECTIVE:(\{.*?\})\s*-->', desc)
+            if m:
+                try:
+                    data = json.loads(m.group(1))
+                    channel = data.get('channel', 'DIRECT')
+                    notes = data.get('notes', '')
+                    channels_map = {
+                        'PHONE': 'Assigned by GM (Phone Call)',
+                        'EMAIL': 'Assigned by GM (Email)',
+                        'VERBAL': 'Assigned by GM (In-Person / Verbal)',
+                        'MESSAGE': 'Assigned by GM (WhatsApp / Message)',
+                        'DIRECT': 'Direct GM Order',
+                        'NONE': 'Internal / Self',
+                    }
+                    return channels_map.get(channel, f"Assigned by GM ({channel})"), notes
+                except Exception:
+                    pass
+            return 'Direct Management', ''
+
+        def _parse_co_team(desc):
+            if not desc:
+                return ''
+            m = re.search(r'<!--\s*CO_ASSIGN_TEAM:(\[.*?\])\s*-->', desc)
+            if m:
+                try:
+                    items = json.loads(m.group(1))
+                    return '; '.join([f"{it.get('staffName', 'Staff')} ({it.get('deptName', '')})" for it in items])
+                except Exception:
+                    pass
+            return ''
+
+        def _clean_desc(desc):
+            if not desc:
+                return ''
+            return re.sub(r'<!--.*?-->', '', desc, flags=re.DOTALL).strip()
+
         for t in tasks:
+            directive_origin, directive_notes = _parse_directive(t.description)
+            co_team = _parse_co_team(t.description)
+            clean_desc = _clean_desc(t.description)
+
             writer.writerow([
                 t.id,
                 t.title,
-                t.department.name,
-                t.department.code,
+                t.department.name if t.department else '',
+                t.department.code if t.department else '',
+                directive_origin,
+                directive_notes,
                 t.assigned_to.get_full_name() if t.assigned_to else 'Unassigned',
+                t.assigned_to.email if (t.assigned_to and t.assigned_to.email) else '',
+                co_team,
                 t.created_by.get_full_name() if t.created_by else '',
+                t.created_by.role if t.created_by else '',
                 t.get_priority_display(),
                 t.get_status_display(),
                 t.due_date or '',
-                t.verified_by.get_full_name() if t.verified_by else '',
+                t.created_at.strftime('%Y-%m-%d %H:%M') if t.created_at else '',
                 t.closed_at.strftime('%Y-%m-%d %H:%M') if t.closed_at else '',
+                t.verified_by.get_full_name() if t.verified_by else '',
+                clean_desc,
                 t.gm_feedback_notes or '',
-                t.created_at.strftime('%Y-%m-%d %H:%M'),
             ])
 
         return response
